@@ -206,20 +206,23 @@ it("uploads, retries, checkpoints, and deduplicates through the packed artifact"
           configPath,
           [
             "[collector]",
-            'listen_url = "http://127.0.0.1:9"',
+            'listen_url = "http://127.0.0.1:0"',
             "",
             "[destination]",
-            'base_url = "http://127.0.0.1:9"',
+            `base_url = "${destination.url}"`,
             "",
             "[auth]",
             'mode = "bearer"',
             "",
           ].join("\n"),
         )
-        const environment = isolatedEnvironment(home, {
+        const loginEnvironment = isolatedEnvironment(home, {
           LUMEN_BEARER_TOKEN: token,
-          LUMEN_COLLECTOR_LISTEN_URL: "http://127.0.0.1:0",
-          LUMEN_DESTINATION_BASE_URL: destination.url,
+          LUMEN_DEVICE_ID: "ec7100cb-d60f-479a-a136-85327ec03f8b",
+        })
+        const login = yield* cli.run(configArguments(configPath, "auth", "login"), loginEnvironment)
+        expect(login.exitCode).toBe(0)
+        const environment = isolatedEnvironment(home, {
           LUMEN_DEVICE_ID: "ec7100cb-d60f-479a-a136-85327ec03f8b",
         })
 
@@ -229,7 +232,6 @@ it("uploads, retries, checkpoints, and deduplicates through the packed artifact"
             const collector = yield* startCollector(cli, configPath, environment)
             const ready = yield* nextCollectorEvent(collector, "ready")
             const collectorUrl = readyUrl(ready)
-            expect(collectorUrl).not.toContain(":9")
 
             yield* submitLog(collectorUrl, logFixture({ eventId: "event-1", input: 7, output: 3 }))
             yield* nextCollectorEvent(collector, "warning")
@@ -315,6 +317,11 @@ it("uploads, retries, checkpoints, and deduplicates through the packed artifact"
         const shown = yield* cli.run(configArguments(configPath, "config", "show"), environment)
         expect(shown.exitCode).toBe(0)
         expect(shown.stdout).not.toContain(token)
+        const logout = yield* cli.run(configArguments(configPath, "auth", "logout"), environment)
+        expect(logout.exitCode).toBe(0)
+        expect(
+          yield* Effect.promise(() => readFile(join(home, "credentials.json"), "utf8")),
+        ).not.toContain(token)
       }),
     ),
   )

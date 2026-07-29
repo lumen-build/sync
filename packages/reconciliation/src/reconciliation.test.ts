@@ -85,6 +85,33 @@ it.effect("keeps raw sources separate without inventing a total", () =>
   }).pipe(Effect.provide(layer)),
 )
 
+it.effect("keeps only the explicitly authoritative source", () =>
+  Effect.gen(function* () {
+    const service = yield* Reconciliation
+    const shared = {
+      baselines: [],
+      ccusage: [daily(150)],
+      ccusageCosts: [dailyCost(1_500)],
+      costBaselines: [],
+      otel: [live(100, 3)],
+      otelCosts: [liveCost(1_000, 3)],
+    }
+
+    expect(yield* service.reconcile({ ...shared, policy: "otel-only" })).toEqual({
+      _tag: "Canonical",
+      costs: [{ ...dailyCost(1_000), coverage: "complete" }],
+      policy: "otel-only",
+      snapshots: [daily(100)],
+    })
+    expect(yield* service.reconcile({ ...shared, policy: "ccusage-only" })).toEqual({
+      _tag: "Canonical",
+      costs: [dailyCost(1_500)],
+      policy: "ccusage-only",
+      snapshots: [daily(150)],
+    })
+  }).pipe(Effect.provide(layer)),
+)
+
 it.effect("uses ccusage as a baseline and adds only later live deltas", () =>
   Effect.gen(function* () {
     const service = yield* Reconciliation

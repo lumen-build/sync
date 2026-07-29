@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -12,9 +12,10 @@ const cliPath = join(import.meta.dir, "cli.ts")
 const runCli = async (
   arguments_: ReadonlyArray<string>,
   environment: Readonly<Record<string, string | undefined>> = process.env,
+  cwd = join(import.meta.dir, "../../.."),
 ) => {
   const child = Bun.spawn([process.execPath, cliPath, ...arguments_], {
-    cwd: join(import.meta.dir, "../../.."),
+    cwd,
     env: environment,
     stderr: "pipe",
     stdout: "pipe",
@@ -26,6 +27,14 @@ const runCli = async (
   ])
   return { exitCode, stderr, stdout }
 }
+
+test("reports the package manifest version", async () => {
+  const manifest = (await import("../package.json")) as { readonly version: string }
+  const result = await runCli(["--version"])
+
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.trim()).toBe(`lumen-sync v${manifest.version}`)
+})
 
 const parseEvents = (stdout: string) =>
   stdout
@@ -157,8 +166,7 @@ test("reports Copilot's supported environment without writing user telemetry set
   const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-copilot-"))
   try {
     const configPath = join(home, "config.toml")
-    const collectorUrl = "http://127.0.0.1:4318"
-    await writeFile(configPath, ["[collector]", `listen_url = "${collectorUrl}"`, ""].join("\n"))
+    await writeFile(configPath, "")
     const telemetryPath = join(home, ".copilot", "otel", "lumen-sync.jsonl")
     const telemetryNames = new Set([
       "COPILOT_OTEL_ENABLED",
@@ -221,6 +229,228 @@ test("reports Copilot's supported environment without writing user telemetry set
       },
       type: "result",
     })
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
+test("resolves a bare config filename before deriving private and service paths", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-relative-config-"))
+  try {
+    const canonicalHome = await realpath(home)
+    const configPath = join(canonicalHome, "config.toml")
+    const executablePath = join(canonicalHome, "bin", "lumen-sync")
+    await writeFile(configPath, "")
+    const environment = {
+      ...process.env,
+      HOME: canonicalHome,
+      LUMEN_EXECUTABLE_PATH: executablePath,
+      USERPROFILE: canonicalHome,
+      XDG_CONFIG_HOME: join(canonicalHome, ".config"),
+    }
+    const pathResult = await runCli(
+      ["--config", "config.toml", "--json", "config", "path"],
+      environment,
+      canonicalHome,
+    )
+    expect(pathResult.exitCode).toBe(0)
+    expect(parseEvents(pathResult.stdout)[0]).toMatchObject({
+      command: "config.path",
+      data: { path: configPath },
+      type: "result",
+    })
+
+    const definition = await Effect.runPromise(
+      makeServiceDefinition({
+        configPath,
+        executablePath,
+        host: {
+          ...(process.env.APPDATA === undefined ? {} : { appData: process.env.APPDATA }),
+          configHome: join(canonicalHome, ".config"),
+          home: canonicalHome,
+          platform:
+            process.platform === "win32"
+              ? "win32"
+              : process.platform === "darwin"
+                ? "darwin"
+                : "linux",
+          ...(process.getuid === undefined ? {} : { userId: process.getuid() }),
+        },
+      }),
+    )
+    await mkdir(dirname(definition.artifact.path), { recursive: true })
+    await writeFile(definition.artifact.path, definition.artifact.contents)
+    const serviceResult = await runCli(
+      ["--config", "config.toml", "--json", "service", "status"],
+      environment,
+      canonicalHome,
+    )
+    expect(serviceResult.exitCode).toBe(0)
+    expect(parseEvents(serviceResult.stdout)[0]).toMatchObject({
+      data: { status: "exact" },
+      type: "result",
+    })
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
+test("maps OIDC init flags, deduplicates scopes, and writes private non-secret TOML", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-oidc-init-"))
+  try {
+    const configPath = join(home, "config.toml")
+    const environment = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+    }
+    const common = [
+      "--config",
+      configPath,
+      "--json",
+      "config",
+      "init",
+      "--collector",
+      "http://127.0.0.1:4318",
+      "--destination",
+      "https://usage.lumen.build",
+      "--auth",
+      "oidc",
+    ]
+    const missing = await runCli(
+      [...common, "--oidc-issuer", "https://identity.lumen.build"],
+      environment,
+    )
+    expect(missing.exitCode).not.toBe(0)
+    expect(parseEvents(missing.stdout)[0]).toMatchObject({
+      command: "config.init",
+      error: { code: "Configuration.Invalid" },
+      type: "error",
+    })
+
+    const initialized = await runCli(
+      [
+        ...common,
+        "--oidc-issuer",
+        "https://identity.lumen.build",
+        "--oidc-client-id",
+        "sync-cli",
+        "--oidc-redirect-uri",
+        "http://127.0.0.1:9876/callback",
+        "--oidc-scope",
+        "openid",
+        "--oidc-scope",
+        "openid",
+        "--oidc-scope",
+        "offline_access",
+      ],
+      environment,
+    )
+    expect(initialized.exitCode).toBe(0)
+    expect(parseEvents(initialized.stdout)[0]).toMatchObject({
+      command: "config.init",
+      data: {
+        configuration: {
+          auth: {
+            mode: "oidc",
+            oidc: {
+              scopes: ["openid", "offline_access"],
+            },
+          },
+        },
+      },
+      type: "result",
+    })
+    const contents = await readFile(configPath, "utf8")
+    expect(contents).not.toContain("password")
+    if (process.platform !== "win32") expect((await stat(configPath)).mode & 0o777).toBe(0o600)
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
+test("doctor reports missing, healthy, and conflicting harness states", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-doctor-"))
+  try {
+    const configPath = join(home, "config.toml")
+    const environment = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+    }
+    await writeFile(configPath, "")
+    const missing = await runCli(["--config", configPath, "--json", "doctor"], environment)
+    expect(missing.exitCode).toBe(0)
+    expect(parseEvents(missing.stdout)).toMatchObject([
+      {
+        command: "doctor",
+        data: { issue: "collector.listen_url is not configured" },
+        type: "warning",
+      },
+      {
+        command: "doctor",
+        data: { ok: false },
+        type: "result",
+      },
+    ])
+
+    await writeFile(
+      configPath,
+      ["[collector]", 'listen_url = "http://127.0.0.1:4318"', ""].join("\n"),
+    )
+    const healthy = await runCli(["--config", configPath, "--json", "doctor"], environment)
+    expect(healthy.exitCode).toBe(0)
+    expect(parseEvents(healthy.stdout)).toMatchObject([
+      {
+        command: "doctor",
+        data: { issues: [], ok: true },
+        type: "result",
+      },
+    ])
+
+    await mkdir(join(home, ".claude"), { recursive: true })
+    await writeFile(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({ env: { CLAUDE_CODE_ENABLE_TELEMETRY: "0" } }),
+    )
+    const conflicting = await runCli(["--config", configPath, "--json", "doctor"], environment)
+    expect(conflicting.exitCode).toBe(0)
+    expect(parseEvents(conflicting.stdout)).toMatchObject([
+      {
+        command: "doctor",
+        data: { issue: "claude: conflicting" },
+        type: "warning",
+      },
+      {
+        command: "doctor",
+        data: { issues: ["claude: conflicting"], ok: false },
+        type: "result",
+      },
+    ])
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
+test("rejects credentialed configuration without printing embedded credentials", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-secret-url-"))
+  try {
+    const configPath = join(home, "config.toml")
+    const secret = "must-not-appear"
+    await writeFile(
+      configPath,
+      ["[destination]", `base_url = "https://user:${secret}@usage.lumen.build"`, ""].join("\n"),
+    )
+    const result = await runCli(["--config", configPath, "--json", "config", "show"], {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+    })
+    expect(result.exitCode).not.toBe(0)
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(secret)
   } finally {
     await rm(home, { force: true, recursive: true })
   }

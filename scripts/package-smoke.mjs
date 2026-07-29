@@ -42,9 +42,10 @@ try {
       cwd: temporary,
       encoding: "utf8",
     }).trim()
-    if (reportedVersion !== installedManifest.version) {
+    const expectedVersion = `lumen-sync v${installedManifest.version}`
+    if (reportedVersion !== expectedVersion) {
       throw new Error(
-        `CLI reported ${JSON.stringify(reportedVersion)} but package version is ${JSON.stringify(installedManifest.version)}`,
+        `CLI reported ${JSON.stringify(reportedVersion)} but expected ${JSON.stringify(expectedVersion)}`,
       )
     }
 

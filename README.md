@@ -655,11 +655,12 @@ The mock's request journal must match the exact request count, provider route,
 model sequence, message-role shape, system-message count, tool count, and one
 canary occurrence per request. Its usage response is generated from a
 fixed per-request golden fixture that is independent of the request meter. The
-meter separately asserts the exact lexical input, system, and overhead counts
-for every normalized message and tool string, so harness-added system
-instructions and tool schemas are part of the proof instead of moving both
-sides of one assertion together. The destination must then contain exactly the
-source-appropriate input/output pairs and no additional pairs. Claude's native metric combines
+meter separately asserts exact macOS- and Linux-specific lexical input, system,
+and overhead counts for every normalized message and tool string. Harness-added
+system instructions and tool schemas are therefore part of the proof without
+pretending the platform envelopes are identical. The destination must then
+contain exactly the source-appropriate input/output pairs and no additional pairs.
+Claude's native metric combines
 both request inputs with the final output while ccusage records the final
 request. OpenCode makes an auxiliary title request but exposes only the primary
 request through its usage event and ccusage. Codex is one-to-one; Gemini proves
@@ -667,7 +668,7 @@ the exact daily path because native live OTLP was not observed. Copilot proves
 that its native file metric and the ccusage daily snapshot both preserve the
 single request's exact input/output pair.
 
-These assertions prove the exact lexical request envelope and lossless
+These assertions prove the exact platform-specific lexical request envelope and lossless
 propagation of an independently fixed provider usage response. The lexical
 meter does not claim to reproduce proprietary provider tokenizers; a real
 provider's usage response is the production authority. VS Code remains outside

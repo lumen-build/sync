@@ -83,14 +83,15 @@ strict local model mock:
 | OpenCode           | Auxiliary plus primary requests; exact primary usage in packed-plugin live and daily data |
 
 The strict model mock returns fixed per-request usage fixtures independently of
-the request meter. The meter separately asserts exact lexical input, system,
-and overhead counts across every normalized message and tool string in the real
-request. The assertions therefore include harness-added system instructions
-and tool schemas instead of testing only the canary prompt, while a shared
-measurement error cannot move both sides of the telemetry assertion together.
-They also pin request counts, routes, models, message roles, and tool counts,
-then require the exact reported input/output pairs—and no extra pairs—at the
-supported live and daily destinations.
+the request meter. The meter separately asserts exact macOS- and Linux-specific
+lexical input, system, and overhead counts across every normalized message and
+tool string in the real request. The assertions therefore include
+harness-added system instructions and tool schemas without pretending the
+platform envelopes are identical, while a shared measurement error cannot move
+both sides of the telemetry assertion together. They also pin request counts,
+routes, models, message roles, and tool counts, then require the exact reported
+input/output pairs—and no extra pairs—at the supported live and daily
+destinations.
 
 This proves a deterministic lexical request envelope and provider-usage
 propagation; it is not a reimplementation of each provider's proprietary

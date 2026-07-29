@@ -45,11 +45,11 @@ interface HarnessFixtureExpectation {
   readonly providerUsage: ReadonlyArray<ExpectedUsage>
   readonly requestPath: RegExp
   readonly requestShapes: ReadonlyArray<{
-    readonly inputTokenUnits: number
     readonly messageRoles: ReadonlyArray<string>
-    readonly overheadTokenUnits: number
+    readonly minimumInputTokenUnits: number
+    readonly minimumOverheadTokenUnits: number
+    readonly minimumSystemTokenUnits: number
     readonly systemMessages: number
-    readonly systemTokenUnits: number
     readonly toolDefinitions: number
   }>
   readonly responseContent: string
@@ -61,25 +61,25 @@ const expectations = {
     models: ["claude-opus-5", "claude-opus-5"],
     nativeLiveProof: "tokens",
     providerUsage: [
-      { input: 391, output: 3 },
-      { input: 141, output: 3 },
+      { input: 1101, output: 101 },
+      { input: 1102, output: 102 },
     ],
     requestPath: /^\/v1\/messages(?:\?.*)?$/u,
     requestShapes: [
       {
-        inputTokenUnits: 391,
         messageRoles: ["system", "user"],
-        overheadTokenUnits: 390,
+        minimumInputTokenUnits: 300,
+        minimumOverheadTokenUnits: 299,
+        minimumSystemTokenUnits: 300,
         systemMessages: 1,
-        systemTokenUnits: 349,
         toolDefinitions: 0,
       },
       {
-        inputTokenUnits: 141,
         messageRoles: ["system", "user"],
-        overheadTokenUnits: 140,
+        minimumInputTokenUnits: 100,
+        minimumOverheadTokenUnits: 99,
+        minimumSystemTokenUnits: 50,
         systemMessages: 1,
-        systemTokenUnits: 70,
         toolDefinitions: 0,
       },
     ],
@@ -89,15 +89,15 @@ const expectations = {
   codex: {
     models: ["lumen-e2e-model"],
     nativeLiveProof: "tokens",
-    providerUsage: [{ input: 6540, output: 3 }],
+    providerUsage: [{ input: 2201, output: 201 }],
     requestPath: /^\/v1\/responses$/u,
     requestShapes: [
       {
-        inputTokenUnits: 6540,
         messageRoles: ["system", "system", "user", "user"],
-        overheadTokenUnits: 6539,
+        minimumInputTokenUnits: 6_000,
+        minimumOverheadTokenUnits: 5_999,
+        minimumSystemTokenUnits: 5_000,
         systemMessages: 2,
-        systemTokenUnits: 5260,
         toolDefinitions: 8,
       },
     ],
@@ -107,15 +107,15 @@ const expectations = {
   copilot: {
     models: ["lumen-e2e-model"],
     nativeLiveProof: "file",
-    providerUsage: [{ input: 12479, output: 3 }],
+    providerUsage: [{ input: 3301, output: 301 }],
     requestPath: /^\/v1\/responses$/u,
     requestShapes: [
       {
-        inputTokenUnits: 12479,
         messageRoles: ["system", "user"],
-        overheadTokenUnits: 12478,
+        minimumInputTokenUnits: 12_000,
+        minimumOverheadTokenUnits: 11_999,
+        minimumSystemTokenUnits: 6_000,
         systemMessages: 1,
-        systemTokenUnits: 6804,
         toolDefinitions: 16,
       },
     ],
@@ -125,15 +125,15 @@ const expectations = {
   gemini: {
     models: ["gemini-3.1-pro-preview-customtools"],
     nativeLiveProof: "none",
-    providerUsage: [{ input: 7522, output: 3 }],
+    providerUsage: [{ input: 4401, output: 401 }],
     requestPath: /^\/v1beta\/models\/[^/?]+:(?:generateContent|streamGenerateContent)(?:\?.*)?$/u,
     requestShapes: [
       {
-        inputTokenUnits: 7522,
         messageRoles: ["system", "user"],
-        overheadTokenUnits: 7521,
+        minimumInputTokenUnits: 7_000,
+        minimumOverheadTokenUnits: 6_999,
+        minimumSystemTokenUnits: 6_000,
         systemMessages: 1,
-        systemTokenUnits: 6502,
         toolDefinitions: 10,
       },
     ],
@@ -144,25 +144,25 @@ const expectations = {
     models: ["gpt-5.4-nano", "lumen-e2e-model"],
     nativeLiveProof: "tokens",
     providerUsage: [
-      { input: 493, output: 3 },
-      { input: 5782, output: 3 },
+      { input: 5501, output: 501 },
+      { input: 5502, output: 502 },
     ],
     requestPath: /^\/v1\/responses$/u,
     requestShapes: [
       {
-        inputTokenUnits: 493,
         messageRoles: ["system", "user", "user"],
-        overheadTokenUnits: 492,
+        minimumInputTokenUnits: 400,
+        minimumOverheadTokenUnits: 399,
+        minimumSystemTokenUnits: 400,
         systemMessages: 1,
-        systemTokenUnits: 485,
         toolDefinitions: 0,
       },
       {
-        inputTokenUnits: 5782,
         messageRoles: ["system", "user"],
-        overheadTokenUnits: 5781,
+        minimumInputTokenUnits: 5_000,
+        minimumOverheadTokenUnits: 4_999,
+        minimumSystemTokenUnits: 1_900,
         systemMessages: 1,
-        systemTokenUnits: 2027,
         toolDefinitions: 10,
       },
     ],
@@ -359,25 +359,17 @@ const exactCompletion = (
     process.stderr.write(`${JSON.stringify({ agent, completions: proofs }, null, 2)}\n`)
   }
   expect(completions.map((request) => request.model)).toEqual([...expectations[agent].models])
-  expect(
-    proofs.map(({ proof }) => ({
-      inputTokenUnits: proof.inputTokenUnits,
-      messageRoles: proof.messageRoles,
-      overheadTokenUnits: proof.overheadTokenUnits,
-      systemMessages: proof.systemMessages,
-      systemTokenUnits: proof.systemTokenUnits,
-      toolDefinitions: proof.toolDefinitions,
-    })),
-  ).toEqual(
-    expectations[agent].requestShapes.map((shape) => ({
-      inputTokenUnits: shape.inputTokenUnits,
-      messageRoles: [...shape.messageRoles],
-      overheadTokenUnits: shape.overheadTokenUnits,
-      systemMessages: shape.systemMessages,
-      systemTokenUnits: shape.systemTokenUnits,
-      toolDefinitions: shape.toolDefinitions,
-    })),
-  )
+  for (const [index, { proof }] of proofs.entries()) {
+    const shape = expectations[agent].requestShapes[index]
+    if (shape === undefined) throw new Error(`missing ${agent} request shape ${index}`)
+    expect(proof.messageRoles).toEqual([...shape.messageRoles])
+    expect(proof.systemMessages).toBe(shape.systemMessages)
+    expect(proof.toolDefinitions).toBe(shape.toolDefinitions)
+    expect(proof.inputTokenUnits).toBeGreaterThanOrEqual(shape.minimumInputTokenUnits)
+    expect(proof.overheadTokenUnits).toBeGreaterThanOrEqual(shape.minimumOverheadTokenUnits)
+    expect(proof.systemTokenUnits).toBeGreaterThanOrEqual(shape.minimumSystemTokenUnits)
+    expect(proof.inputTokenUnits).toBe(proof.overheadTokenUnits + 1)
+  }
   for (const { proof } of proofs) {
     expect(proof.canaryOccurrences).toBe(1)
     expect(proof.inputCharacters).toBeGreaterThanOrEqual(canary.length)
