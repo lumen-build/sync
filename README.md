@@ -165,7 +165,7 @@ Existing JSONC comments and unrelated settings are retained. Conflicting managed
 
 Content capture is disabled. Claude and Codex are configured to send token metrics, not prompt-bearing logs. Gemini traces and prompt logging are disabled. VS Code and Copilot content capture are disabled.
 
-OpenCode does not currently expose the same native telemetry configuration surface. The package exports `@lumen-build/sync/opencode`, which listens for both legacy assistant-message events and current step events. It sends only usage, model, provider, cost, timestamp, and event identity. OpenCode must receive an explicit environment endpoint:
+OpenCode does not currently expose the same native telemetry configuration surface. `harness configure` adds the published `@lumen-build/sync` package to OpenCode's plugin list; the package exposes OpenCode's `./server` plugin entry while keeping `@lumen-build/sync/opencode` available for direct imports. The plugin listens for both legacy assistant-message events and current step events. It sends only usage, model, provider, cost, timestamp, and event identity. OpenCode must receive an explicit environment endpoint:
 
 ```sh
 export LUMEN_COLLECTOR_OTLP_ENDPOINT="http://127.0.0.1:4318"
@@ -173,14 +173,15 @@ export LUMEN_COLLECTOR_OTLP_ENDPOINT="http://127.0.0.1:4318"
 
 If the plugin cannot be used, OpenCode daily sync through ccusage remains available.
 
-The pinned OpenCode E2E proves that the installed package's plugin export emits
-a live envelope, but its first event currently reports zero token fields. The
-daily ccusage import is non-empty. Gemini CLI 0.53.0 consumes the exact managed
-telemetry configuration and creates a non-empty ccusage report, but did not
-flush native OTLP to the collector in two bounded test runs. Neither limitation
-is hidden by injecting an undocumented endpoint or by waiting indefinitely.
+The pinned OpenCode E2E resolves the installed tarball through OpenCode's native
+package-plugin cache and proves that the managed plugin entry emits a live
+envelope. Its first event currently reports zero token fields; the daily ccusage
+import is non-empty. Gemini CLI 0.53.0 consumes the exact managed telemetry
+configuration and creates a non-empty ccusage report, but did not flush native
+OTLP to the collector in two bounded test runs. Neither limitation is hidden by
+injecting an undocumented endpoint or by waiting indefinitely.
 
-The harness settings follow the vendors’ observability surfaces: [Claude Code](https://code.claude.com/docs/en/agent-sdk/observability), [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced), [VS Code Copilot](https://code.visualstudio.com/docs/agents/guides/monitoring-agents), [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), and [Gemini CLI](https://geminicli.com/docs/cli/telemetry/).
+The harness settings follow the vendors’ observability and extension surfaces: [Claude Code](https://code.claude.com/docs/en/agent-sdk/observability), [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced), [VS Code Copilot](https://code.visualstudio.com/docs/agents/guides/monitoring-agents), [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), [Gemini CLI](https://geminicli.com/docs/cli/telemetry/), and [OpenCode plugins](https://opencode.ai/docs/plugins/).
 
 ## Run live collection
 
@@ -536,7 +537,8 @@ The command surface is resource/verb based:
 
 The library exports stable schemas from `@lumen-build/sync/contracts`, Bun
 adapters from `@lumen-build/sync/bun`, and the OpenCode integration from
-`@lumen-build/sync/opencode`.
+`@lumen-build/sync/opencode`. OpenCode itself discovers the same integration
+through the package's `./server` export.
 
 ## Development and proof
 

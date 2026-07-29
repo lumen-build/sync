@@ -1,5 +1,4 @@
 import { join } from "node:path"
-import { pathToFileURL } from "node:url"
 
 import { expect, it } from "bun:test"
 import { Effect, Schema } from "effect"
@@ -183,14 +182,7 @@ const vendorConfiguration = Effect.fn("E2E.Harness.vendorConfiguration")(functio
         )}\n`,
       )
       yield* linkPackedOpenCodePlugin(cli, home)
-      yield* cli.write(
-        join(home, ".config", "opencode", "plugins", "lumen-sync.ts"),
-        `export { LumenSync } from ${JSON.stringify(
-          pathToFileURL(
-            join(cli.consumer, "node_modules", "@lumen-build", "sync", "dist", "opencode.js"),
-          ).href,
-        )}\n`,
-      )
+      yield* cli.write(join(home, ".npmrc"), "@lumen-build:registry=http://127.0.0.1:9\n")
       return
   }
 })

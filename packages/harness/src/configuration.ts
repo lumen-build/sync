@@ -55,7 +55,7 @@ const isPresent = (
 ): value is Extract<ManagedValue, { readonly _tag: "Present" }> => value._tag === "Present"
 
 const baseUrl = (collectorUrl: string): string => collectorUrl.replace(/\/+$/u, "")
-const openCodePlugin = "@lumen-build/sync/opencode"
+const openCodePlugin = "@lumen-build/sync"
 const endpoint = (collectorUrl: string, signal: "logs" | "metrics" | "traces"): string =>
   `${baseUrl(collectorUrl)}/v1/${signal}`
 

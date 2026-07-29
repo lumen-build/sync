@@ -44,7 +44,7 @@ it.effect("configures every harness without adding a default collector", () =>
         harness,
       })
       expect(configured.contents).toContain(
-        harness === "opencode" ? "@lumen-build/sync/opencode" : "collector.lumen.build",
+        harness === "opencode" ? "@lumen-build/sync" : "collector.lumen.build",
       )
       const repeated = yield* prepareConfiguration({
         collectorUrl,
@@ -145,17 +145,14 @@ it.effect("adds and removes the OpenCode plugin without disturbing other plugins
       force: false,
       harness: "opencode",
     })
-    expect(JSON.parse(configured.contents).plugin).toEqual([
-      "existing-plugin",
-      "@lumen-build/sync/opencode",
-    ])
+    expect(JSON.parse(configured.contents).plugin).toEqual(["existing-plugin", "@lumen-build/sync"])
 
     const removed = yield* prepareRemoval({
       changes: configured.changes,
       collectorUrl,
       contents: configured.contents.replace(
-        '"@lumen-build/sync/opencode"',
-        '"@lumen-build/sync/opencode", "added-after-sync"',
+        '"@lumen-build/sync"',
+        '"@lumen-build/sync", "added-after-sync"',
       ),
       harness: "opencode",
     })

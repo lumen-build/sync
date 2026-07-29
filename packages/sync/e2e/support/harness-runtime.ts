@@ -1,4 +1,4 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -252,37 +252,29 @@ export const readJsonFile = <A = unknown>(path: string): Effect.Effect<A, Harnes
     catch: (cause) => failure(`read ${path}`, cause),
   })
 
+const packedOpenCodePluginTarget = (home: string): string =>
+  join(
+    home,
+    ".cache",
+    "opencode",
+    "packages",
+    "@lumen-build",
+    "sync@latest",
+    "node_modules",
+    "@lumen-build",
+    "sync",
+  )
+
 export const linkPackedOpenCodePlugin = (
   cli: PackedCli,
   home: string,
 ): Effect.Effect<void, HarnessE2eError> =>
   Effect.tryPromise({
     try: async () => {
-      const cache = join(home, ".cache", "opencode")
-      const scope = join(cache, "node_modules", "@lumen-build")
+      const target = packedOpenCodePluginTarget(home)
+      const scope = join(target, "..")
       await mkdir(scope, { recursive: true })
-      await symlink(
-        join(cli.consumer, "node_modules", "@lumen-build", "sync"),
-        join(scope, "sync"),
-        "junction",
-      )
-      await writeFile(
-        join(cache, "package.json"),
-        `${JSON.stringify(
-          {
-            dependencies: {
-              "@lumen-build/sync": `file:${join(
-                cli.consumer,
-                "node_modules",
-                "@lumen-build",
-                "sync",
-              )}`,
-            },
-          },
-          null,
-          2,
-        )}\n`,
-      )
+      await symlink(join(cli.consumer, "node_modules", "@lumen-build", "sync"), target, "junction")
     },
     catch: (cause) => failure("link packed OpenCode plugin", cause),
   })

@@ -27,6 +27,30 @@ const commandError = (operation: string, cause: unknown): PackedCliError =>
     reason: cause instanceof Error ? cause.message : String(cause),
   })
 
+const stopChild = (child: {
+  readonly exited: Promise<number>
+  readonly exitCode: number | null
+  kill(signal?: number | NodeJS.Signals): void
+}): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    if (child.exitCode !== null) return Effect.void
+    return Effect.sync(() => child.kill("SIGTERM")).pipe(
+      Effect.andThen(
+        Effect.promise(() => child.exited).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () =>
+              Effect.sync(() => child.kill("SIGKILL")).pipe(
+                Effect.andThen(Effect.promise(() => child.exited)),
+              ),
+          }),
+        ),
+      ),
+      Effect.asVoid,
+      Effect.ignore,
+    )
+  })
+
 const runCommand = Effect.fn("E2E.PackedCli.runCommand")(function* (
   command: ReadonlyArray<string>,
   options: {
@@ -314,12 +338,19 @@ export const packedCli = Effect.acquireRelease(
       arguments_: ReadonlyArray<string>,
       environment: Readonly<Record<string, string | undefined>>,
     ) {
-      const child = Bun.spawn([executable, ...arguments_], {
-        cwd: consumer,
-        env: definedEnvironment(environment),
-        stderr: "pipe",
-        stdout: "pipe",
-      })
+      const child = yield* Effect.acquireRelease(
+        Effect.try({
+          try: () =>
+            Bun.spawn([executable, ...arguments_], {
+              cwd: consumer,
+              env: definedEnvironment(environment),
+              stderr: "pipe",
+              stdout: "pipe",
+            }),
+          catch: (cause) => commandError("start CLI", cause),
+        }),
+        stopChild,
+      )
       const events = yield* Queue.unbounded<typeof CliEvent.Type>()
       const stdoutFiber = yield* streamEvents(child.stdout, events).pipe(Effect.forkScoped)
       const stderr = Effect.tryPromise({
@@ -330,10 +361,7 @@ export const packedCli = Effect.acquireRelease(
         events,
         exitCode: Effect.promise(() => child.exited),
         stderr,
-        stop: Effect.sync(() => child.kill("SIGTERM")).pipe(
-          Effect.andThen(Effect.promise(() => child.exited)),
-          Effect.asVoid,
-        ),
+        stop: stopChild(child),
         stdoutDone: Fiber.join(stdoutFiber),
       } satisfies RunningCli
     })

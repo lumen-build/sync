@@ -38,7 +38,11 @@ import { Collector, Config, Harness, Reconciliation, Runtime } from "@lumen-buil
 import { CliEvent } from "@lumen-build/sync/contracts"
 ```
 
-OpenCode can load the usage-only plugin from `@lumen-build/sync/opencode`. It remains inactive until `LUMEN_COLLECTOR_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly set.
+`harness configure --agent opencode` adds `@lumen-build/sync` to OpenCode's
+plugin list. OpenCode discovers the package's `./server` export; direct
+integrators can import `LumenSync` from `@lumen-build/sync/opencode`. The plugin
+remains inactive until `LUMEN_COLLECTOR_OTLP_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly set.
 
 ## Harness verification
 

@@ -116,6 +116,78 @@ it("runs the packed CLI without inventing a default endpoint", async () => {
           },
         ])
         expect(yield* destination.requests).toEqual([])
+
+        yield* cli.write(
+          configPath,
+          ["[collector]", 'listen_url = "http://127.0.0.1:0"', ""].join("\n"),
+        )
+        const missingDestination = yield* cli.run(
+          configArguments(configPath, "collector", "run", "--upload-interval", "1"),
+          isolatedEnvironment(home),
+        )
+        expect(missingDestination.exitCode).not.toBe(0)
+        expect(missingDestination.events).toMatchObject([
+          {
+            command: "collector.run",
+            error: {
+              code: "Configuration.Missing",
+              message: "Missing configuration: destination.base_url",
+            },
+            type: "error",
+          },
+        ])
+        expect(yield* destination.requests).toEqual([])
+      }),
+    ),
+  )
+}, 90_000)
+
+it("stops a packed collector when its owning Effect scope fails", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cli = yield* packedCli
+        const destination = yield* mockDestination
+        const home = yield* cli.makeHome("scoped-collector")
+        const configPath = join(home, "config.toml")
+        yield* cli.write(
+          configPath,
+          [
+            "[collector]",
+            'listen_url = "http://127.0.0.1:0"',
+            "",
+            "[destination]",
+            `base_url = "${destination.url}"`,
+            "",
+            "[auth]",
+            'mode = "bearer"',
+            "",
+          ].join("\n"),
+        )
+        const environment = isolatedEnvironment(home, {
+          LUMEN_BEARER_TOKEN: "scoped-collector-token",
+          LUMEN_DEVICE_ID: "43f75365-6c3a-409a-899f-b97eef60866f",
+        })
+        let abandonedUrl: string | undefined
+        const failed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const collector = yield* startCollector(cli, configPath, environment)
+            abandonedUrl = readyUrl(yield* nextCollectorEvent(collector, "ready"))
+            return yield* Effect.fail(new Error("intentional failure after collector readiness"))
+          }),
+        ).pipe(Effect.result)
+
+        expect(failed._tag).toBe("Failure")
+        if (abandonedUrl === undefined) throw new Error("collector did not publish its URL")
+        const releasedUrl = abandonedUrl
+        const connection = yield* Effect.tryPromise({
+          try: () =>
+            fetch(releasedUrl, {
+              signal: AbortSignal.timeout(1_000),
+            }),
+          catch: (cause) => cause,
+        }).pipe(Effect.result)
+        expect(connection._tag).toBe("Failure")
       }),
     ),
   )
@@ -360,8 +432,9 @@ it("exchanges a CI OIDC assertion without forwarding it to the destination", asy
         const configPath = join(home, "config.toml")
         yield* cli.write(configPath, oidcConfiguration("http://127.0.0.1:0", destination.url, oidc))
         const environment = isolatedEnvironment(home, {
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-actions-request-token",
+          ACTIONS_ID_TOKEN_REQUEST_URL: oidc.ciAssertionUrl,
           LUMEN_DEVICE_ID: "b9cc4878-de22-47f1-84e3-8af68acdbb24",
-          LUMEN_OIDC_ASSERTION: oidc.assertion,
         })
 
         yield* Effect.scoped(
@@ -382,6 +455,17 @@ it("exchanges a CI OIDC assertion without forwarding it to the destination", asy
         expect(request?.authorization).toStartWith("Bearer ")
         expect(request?.authorization).not.toContain(oidc.assertion)
         expect(JSON.stringify(request?.body)).not.toContain(oidc.assertion)
+        expect(oidc.ciAssertionRequests).toEqual([
+          {
+            audience: "https://usage.lumen.build",
+            authorization: "Bearer github-actions-request-token",
+          },
+        ])
+        expect(oidc.tokenRequests).toMatchObject([
+          {
+            grantType: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+          },
+        ])
       }),
     ),
   )
@@ -448,12 +532,19 @@ it("completes local PKCE login, refreshes, and revokes with mocked OIDC", async 
           }),
         )
         const [request] = yield* destination.requests
-        expect(request?.authorization).toStartWith("Bearer ")
+        expect(oidc.tokenRequests).toHaveLength(2)
+        expect(oidc.tokenRequests.map(({ grantType }) => grantType)).toEqual([
+          "authorization_code",
+          "refresh_token",
+        ])
+        const refreshed = oidc.tokenRequests[1]
+        expect(refreshed?.refreshToken).toBe(oidc.refreshToken)
+        expect(request?.authorization).toBe(`Bearer ${refreshed?.accessToken}`)
         expect(request?.authorization).not.toContain(oidc.refreshToken)
 
         const logout = yield* cli.run(configArguments(configPath, "auth", "logout"), environment)
         expect(logout.exitCode).toBe(0)
-        expect(oidc.revocations).toHaveLength(1)
+        expect(oidc.revocations).toEqual([oidc.refreshToken])
         expect(yield* Effect.promise(() => readFile(credentialsPath, "utf8"))).not.toContain(
           oidc.refreshToken,
         )

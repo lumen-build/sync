@@ -42,6 +42,7 @@ try {
       'import "@lumen-build/sync/bun"',
       'import "@lumen-build/sync/contracts"',
       'import "@lumen-build/sync/opencode"',
+      'import "@lumen-build/sync/server"',
       "",
       `for (const name of ${JSON.stringify([
         "Auth",
