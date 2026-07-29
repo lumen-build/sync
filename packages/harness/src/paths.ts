@@ -1,5 +1,3 @@
-import { posix, win32 } from "node:path"
-
 import type { Harness } from "./model"
 
 export interface HostPaths {
@@ -15,40 +13,65 @@ export interface HarnessPaths {
   readonly ownership: string
 }
 
-const pathFor = (host: HostPaths) => (host.platform === "win32" ? win32 : posix)
+const joinHost = (platform: HostPaths["platform"], ...parts: ReadonlyArray<string>): string => {
+  const separator = platform === "win32" ? "\\" : "/"
+  return parts
+    .filter((part) => part.length > 0)
+    .map((part, index) =>
+      index === 0
+        ? part.replace(new RegExp(`${separator === "\\" ? "\\\\" : separator}+$`, "u"), "")
+        : part.replace(
+            new RegExp(
+              `^${separator === "\\" ? "\\\\" : separator}+|${separator === "\\" ? "\\\\" : separator}+$`,
+              "gu",
+            ),
+            "",
+          ),
+    )
+    .join(separator)
+}
 
 const configurationRoot = (host: HostPaths): string => {
-  const path = pathFor(host)
   return (
     host.configHome ??
     (host.platform === "win32"
-      ? (host.appData ?? path.join(host.home, "AppData", "Roaming"))
-      : path.join(host.home, ".config"))
+      ? (host.appData ?? joinHost(host.platform, host.home, "AppData", "Roaming"))
+      : joinHost(host.platform, host.home, ".config"))
   )
 }
 
 const vscodeSettings = (host: HostPaths, root: string): string => {
-  const path = pathFor(host)
   if (host.platform === "darwin") {
-    return path.join(host.home, "Library", "Application Support", "Code", "User", "settings.json")
+    return joinHost(
+      host.platform,
+      host.home,
+      "Library",
+      "Application Support",
+      "Code",
+      "User",
+      "settings.json",
+    )
   }
-  return path.join(root, "Code", "User", "settings.json")
+  return joinHost(host.platform, root, "Code", "User", "settings.json")
 }
 
 export const makeHarnessPaths = (host: HostPaths): HarnessPaths => {
-  const path = pathFor(host)
   const root = configurationRoot(host)
-  const supportDirectory = path.join(root, "lumen-build", "sync")
+  const supportDirectory = joinHost(host.platform, root, "lumen-build", "sync")
 
   return {
     configurations: {
-      claude: path.join(host.home, ".claude", "settings.json"),
-      codex: path.join(host.home, ".codex", "config.toml"),
-      copilot: path.join(host.copilotHome ?? path.join(host.home, ".copilot"), "settings.json"),
-      gemini: path.join(host.home, ".gemini", "settings.json"),
-      opencode: path.join(root, "opencode", "opencode.json"),
+      claude: joinHost(host.platform, host.home, ".claude", "settings.json"),
+      codex: joinHost(host.platform, host.home, ".codex", "config.toml"),
+      copilot: joinHost(
+        host.platform,
+        host.copilotHome ?? joinHost(host.platform, host.home, ".copilot"),
+        "settings.json",
+      ),
+      gemini: joinHost(host.platform, host.home, ".gemini", "settings.json"),
+      opencode: joinHost(host.platform, root, "opencode", "opencode.json"),
       vscode: vscodeSettings(host, root),
     },
-    ownership: path.join(supportDirectory, "harness-ownership.json"),
+    ownership: joinHost(host.platform, supportDirectory, "harness-ownership.json"),
   }
 }

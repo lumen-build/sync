@@ -39,6 +39,7 @@ import {
   makeHarnessPaths,
   removeHarness,
 } from "@lumen-build/sync-harness"
+import { bunHarnessFileSystemLayer } from "@lumen-build/sync-harness/bun"
 import {
   installService,
   liveServiceCommandRunnerLayer,
@@ -442,6 +443,7 @@ const application = root.pipe(
 )
 
 Command.run(application, { version: VERSION }).pipe(
+  Effect.provide(bunHarnessFileSystemLayer),
   Effect.provide(BunServices.layer),
   BunRuntime.runMain,
 )

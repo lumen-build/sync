@@ -1,12 +1,66 @@
+/* oxlint-disable no-underscore-dangle -- assertions inspect Effect-style tagged errors. */
+
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
+import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 
-import { configureHarness, removeHarness } from "./lifecycle"
+import { bunHarnessFileSystemLayer } from "./lifecycle-bun"
+import { configureHarness, inspectHarness, removeHarness } from "./lifecycle"
 import { makeHarnessPaths } from "./paths"
+
+const lifecycleLayer = bunHarnessFileSystemLayer.pipe(Layer.provide(BunServices.layer))
+
+it.effect("reports missing, exact, and conflicting harness configuration", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-sync-harness-"))),
+    (home) =>
+      Effect.gen(function* () {
+        const paths = makeHarnessPaths({
+          configHome: join(home, ".config"),
+          home,
+          platform: "linux",
+        })
+        const input = {
+          collectorUrl: "https://collector.lumen.build",
+          harness: "vscode" as const,
+          paths,
+        }
+
+        expect(yield* inspectHarness(input)).toMatchObject({
+          managed: false,
+          state: "missing",
+        })
+        yield* configureHarness({ ...input, force: false })
+        expect(yield* inspectHarness(input)).toMatchObject({
+          managed: true,
+          state: "exact",
+        })
+
+        const configured = yield* Effect.promise(() =>
+          readFile(paths.configurations.vscode, "utf8"),
+        )
+        yield* Effect.promise(() =>
+          writeFile(
+            paths.configurations.vscode,
+            configured.replace(
+              '"github.copilot.chat.otel.enabled": true',
+              '"github.copilot.chat.otel.enabled": false',
+            ),
+          ),
+        )
+        expect(yield* inspectHarness(input)).toMatchObject({
+          managed: true,
+          reason: "github.copilot.chat.otel.enabled",
+          state: "conflicting",
+        })
+      }),
+    (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
+  ).pipe(Effect.provide(lifecycleLayer)),
+)
 
 it.effect("configures and safely restores a real mocked harness file", () =>
   Effect.acquireUseRelease(
@@ -48,7 +102,7 @@ it.effect("configures and safely restores a real mocked harness file", () =>
         expect(restored).not.toContain("collector.lumen.build")
       }),
     (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(lifecycleLayer)),
 )
 
 it.effect("retains original ownership when reconfiguring an existing harness file", () =>
@@ -100,7 +154,7 @@ it.effect("retains original ownership when reconfiguring an existing harness fil
         ).toEqual(original)
       }),
     (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(lifecycleLayer)),
 )
 
 it.effect("deletes an originally absent harness file after reconfiguration", () =>
@@ -138,7 +192,7 @@ it.effect("deletes an originally absent harness file after reconfiguration", () 
         expect(error).toMatchObject({ code: "ENOENT" })
       }),
     (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(lifecycleLayer)),
 )
 
 it.effect("rejects ownership records that point outside the known harness paths", () =>
@@ -180,5 +234,5 @@ it.effect("rejects ownership records that point outside the known harness paths"
         expect(yield* Effect.promise(() => readFile(unrelated, "utf8"))).toBe('{"keep":true}\n')
       }),
     (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(lifecycleLayer)),
 )

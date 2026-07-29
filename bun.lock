@@ -91,6 +91,9 @@
         "effect": "4.0.0-beta.102",
         "jsonc-parser": "3.3.1",
       },
+      "devDependencies": {
+        "@effect/platform-bun": "4.0.0-beta.102",
+      },
     },
     "packages/otlp": {
       "name": "@lumen-build/sync-otlp",

@@ -1,10 +1,15 @@
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
+/* oxlint-disable no-underscore-dangle -- Effect-style result values use _tag. */
 
-import { Effect, Schema } from "effect"
+import { Context, Effect, Schema } from "effect"
 
 import { prepareConfiguration, prepareRemoval } from "./configuration"
-import { Harness, managedPathKey, type ManagedChange } from "./model"
+import {
+  Harness,
+  HarnessConfigurationConflict,
+  managedPathKey,
+  type HarnessStatus,
+  type ManagedChange,
+} from "./model"
 import type { HarnessPaths } from "./paths"
 
 const ManagedValueSchema = Schema.Union([
@@ -42,6 +47,26 @@ export class HarnessFileError extends Schema.TaggedErrorClass<HarnessFileError>(
   },
 ) {}
 
+export interface FileSnapshot {
+  readonly contents: string
+  readonly mode: number
+}
+
+export interface HarnessFileSystemInterface {
+  readonly readOptional: (path: string) => Effect.Effect<FileSnapshot | undefined, HarnessFileError>
+  readonly remove: (path: string, operation: string) => Effect.Effect<void, HarnessFileError>
+  readonly writeAtomic: (
+    path: string,
+    contents: string,
+    mode: number,
+  ) => Effect.Effect<void, HarnessFileError>
+}
+
+export class HarnessFileSystem extends Context.Service<
+  HarnessFileSystem,
+  HarnessFileSystemInterface
+>()("@lumen-build/sync/HarnessFileSystem") {}
+
 const fileError = (operation: string, path: string, cause: unknown): HarnessFileError =>
   new HarnessFileError({
     operation,
@@ -49,48 +74,8 @@ const fileError = (operation: string, path: string, cause: unknown): HarnessFile
     reason: cause instanceof Error ? cause.message : String(cause),
   })
 
-const readOptional = (path: string) =>
-  Effect.tryPromise({
-    try: async (): Promise<{ readonly contents: string; readonly mode: number } | undefined> => {
-      try {
-        const metadata = await lstat(path)
-        if (metadata.isSymbolicLink() || !metadata.isFile()) {
-          throw new Error("configuration must be a regular, non-symlink file")
-        }
-        return { contents: await readFile(path, "utf8"), mode: metadata.mode & 0o777 }
-      } catch (cause) {
-        if (
-          typeof cause === "object" &&
-          cause !== null &&
-          "code" in cause &&
-          cause.code === "ENOENT"
-        ) {
-          return undefined
-        }
-        throw cause
-      }
-    },
-    catch: (cause) => fileError("read harness configuration", path, cause),
-  })
-
-const writeAtomic = (path: string, contents: string, mode: number) =>
-  Effect.tryPromise({
-    try: async () => {
-      const temporary = `${path}.${crypto.randomUUID()}.tmp`
-      await mkdir(dirname(path), { mode: 0o700, recursive: true })
-      try {
-        await writeFile(temporary, contents, { mode })
-        await rename(temporary, path)
-        await chmod(path, mode)
-      } finally {
-        await rm(temporary, { force: true })
-      }
-    },
-    catch: (cause) => fileError("write harness configuration", path, cause),
-  })
-
-const readOwnership = (path: string) =>
-  readOptional(path).pipe(
+const readOwnership = (files: HarnessFileSystemInterface, path: string) =>
+  files.readOptional(path).pipe(
     Effect.flatMap((snapshot) =>
       snapshot === undefined
         ? Effect.succeed({ records: [], version: 1 } satisfies Ownership)
@@ -104,8 +89,27 @@ const readOwnership = (path: string) =>
     ),
   )
 
-const writeOwnership = (path: string, ownership: Ownership) =>
-  writeAtomic(path, `${JSON.stringify(ownership, undefined, 2)}\n`, 0o600)
+const writeOwnership = (files: HarnessFileSystemInterface, path: string, ownership: Ownership) =>
+  files.writeAtomic(path, `${JSON.stringify(ownership, undefined, 2)}\n`, 0o600)
+
+const invalidOwnershipRecord = (ownership: Ownership, paths: HarnessPaths) =>
+  ownership.records.find((record) => record.path !== paths.configurations[record.harness])
+
+const validateOwnership = (
+  ownership: Ownership,
+  paths: HarnessPaths,
+): Effect.Effect<void, HarnessFileError> => {
+  const invalid = invalidOwnershipRecord(ownership, paths)
+  return invalid === undefined
+    ? Effect.void
+    : Effect.fail(
+        fileError(
+          "validate harness ownership",
+          paths.ownership,
+          `recorded path does not match ${invalid.harness} configuration`,
+        ),
+      )
+}
 
 export interface ConfigureHarnessInput {
   readonly collectorUrl: string
@@ -120,23 +124,14 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
   harness,
   paths,
 }: ConfigureHarnessInput) {
+  const files = yield* HarnessFileSystem
   const path = paths.configurations[harness]
   const [snapshot, ownership] = yield* Effect.all([
-    readOptional(path),
-    readOwnership(paths.ownership),
+    files.readOptional(path),
+    readOwnership(files, paths.ownership),
   ])
-  const invalidRecord = ownership.records.find(
-    (record) => record.path !== paths.configurations[record.harness],
-  )
-  if (invalidRecord !== undefined) {
-    return yield* Effect.fail(
-      fileError(
-        "validate harness ownership",
-        paths.ownership,
-        `recorded path does not match ${invalidRecord.harness} configuration`,
-      ),
-    )
-  }
+  yield* validateOwnership(ownership, paths)
+
   const prepared = yield* prepareConfiguration({
     collectorUrl,
     contents: snapshot?.contents ?? "",
@@ -145,7 +140,7 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
   })
   if (prepared.changes.length === 0) return prepared
 
-  yield* writeAtomic(path, prepared.contents, snapshot?.mode ?? 0o600)
+  yield* files.writeAtomic(path, prepared.contents, snapshot?.mode ?? 0o600)
   const previousRecord = ownership.records.find((candidate) => candidate.harness === harness)
   const changesByPath = new Map(
     prepared.changes.map((change) => [managedPathKey(change.path), change]),
@@ -166,17 +161,14 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
     harness,
     path,
   }
-  yield* writeOwnership(paths.ownership, {
+  yield* writeOwnership(files, paths.ownership, {
     records: [...ownership.records.filter((candidate) => candidate.harness !== harness), record],
     version: 1,
   }).pipe(
     Effect.catch((error) =>
       (snapshot === undefined
-        ? Effect.tryPromise({
-            try: () => rm(path, { force: true }),
-            catch: () => error,
-          })
-        : writeAtomic(path, snapshot.contents, snapshot.mode)
+        ? files.remove(path, "roll back harness configuration").pipe(Effect.mapError(() => error))
+        : files.writeAtomic(path, snapshot.contents, snapshot.mode)
       ).pipe(Effect.andThen(Effect.fail(error))),
     ),
   )
@@ -192,24 +184,15 @@ export const removeHarness = Effect.fn("HarnessLifecycle.remove")(function* ({
   harness,
   paths,
 }: RemoveHarnessInput) {
-  const ownership = yield* readOwnership(paths.ownership)
-  const invalidRecord = ownership.records.find(
-    (candidate) => candidate.path !== paths.configurations[candidate.harness],
-  )
-  if (invalidRecord !== undefined) {
-    return yield* Effect.fail(
-      fileError(
-        "validate harness ownership",
-        paths.ownership,
-        `recorded path does not match ${invalidRecord.harness} configuration`,
-      ),
-    )
-  }
+  const files = yield* HarnessFileSystem
+  const ownership = yield* readOwnership(files, paths.ownership)
+  yield* validateOwnership(ownership, paths)
+
   const record = ownership.records.find((candidate) => candidate.harness === harness)
   if (record === undefined) return { preserved: [], restored: [] }
-  const snapshot = yield* readOptional(record.path)
+  const snapshot = yield* files.readOptional(record.path)
   if (snapshot === undefined) {
-    yield* writeOwnership(paths.ownership, {
+    yield* writeOwnership(files, paths.ownership, {
       records: ownership.records.filter((candidate) => candidate.harness !== harness),
       version: 1,
     })
@@ -223,16 +206,90 @@ export const removeHarness = Effect.fn("HarnessLifecycle.remove")(function* ({
     harness,
   })
   if (prepared.empty && !record.hadOriginal) {
-    yield* Effect.tryPromise({
-      try: () => rm(record.path, { force: true }),
-      catch: (cause) => fileError("remove harness configuration", record.path, cause),
-    })
+    yield* files.remove(record.path, "remove harness configuration")
   } else {
-    yield* writeAtomic(record.path, prepared.contents, snapshot.mode)
+    yield* files.writeAtomic(record.path, prepared.contents, snapshot.mode)
   }
-  yield* writeOwnership(paths.ownership, {
+  yield* writeOwnership(files, paths.ownership, {
     records: ownership.records.filter((candidate) => candidate.harness !== harness),
     version: 1,
   })
   return { preserved: prepared.preserved, restored: prepared.restored }
+})
+
+export interface InspectHarnessInput {
+  readonly collectorUrl: string
+  readonly harness: Harness
+  readonly paths: HarnessPaths
+}
+
+export const inspectHarness = Effect.fn("HarnessLifecycle.inspect")(function* ({
+  collectorUrl,
+  harness,
+  paths,
+}: InspectHarnessInput) {
+  const files = yield* HarnessFileSystem
+  const path = paths.configurations[harness]
+  const fileResult = yield* Effect.result(files.readOptional(path))
+  const ownershipResult = yield* Effect.result(
+    readOwnership(files, paths.ownership).pipe(
+      Effect.tap((ownership) => validateOwnership(ownership, paths)),
+    ),
+  )
+  const managed =
+    ownershipResult._tag === "Success" &&
+    ownershipResult.success.records.some((record) => record.harness === harness)
+  if (fileResult._tag === "Failure") {
+    return {
+      harness,
+      managed,
+      path,
+      reason: fileResult.failure.reason,
+      state: "unreadable",
+    } satisfies HarnessStatus
+  }
+  if (ownershipResult._tag === "Failure") {
+    return {
+      harness,
+      managed: false,
+      path,
+      reason: ownershipResult.failure.reason,
+      state: "unreadable",
+    } satisfies HarnessStatus
+  }
+  if (fileResult.success === undefined) {
+    return { harness, managed, path, state: "missing" } satisfies HarnessStatus
+  }
+
+  const prepared = yield* Effect.result(
+    prepareConfiguration({
+      collectorUrl,
+      contents: fileResult.success.contents,
+      force: false,
+      harness,
+    }),
+  )
+  if (prepared._tag === "Failure") {
+    return prepared.failure instanceof HarnessConfigurationConflict
+      ? ({
+          harness,
+          managed,
+          path,
+          reason: prepared.failure.fields.join(", "),
+          state: "conflicting",
+        } satisfies HarnessStatus)
+      : ({
+          harness,
+          managed,
+          path,
+          reason: prepared.failure.reason,
+          state: "unreadable",
+        } satisfies HarnessStatus)
+  }
+  return {
+    harness,
+    managed,
+    path,
+    state: prepared.success.state,
+  } satisfies HarnessStatus
 })

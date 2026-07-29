@@ -1,3 +1,6 @@
+import { Config, ConfigProvider, Effect, Option } from "effect"
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+
 type JsonObject = Readonly<Record<string, unknown>>
 
 interface AssistantUsage {
@@ -222,49 +225,121 @@ export const toOtlpLogs = (usage: ReadonlyArray<AssistantUsage>): JsonObject => 
   ],
 })
 
-const logsEndpoint = (endpoint: string): string => {
-  const normalized = endpoint.replace(/\/+$/u, "")
-  return normalized.endsWith("/v1/logs") ? normalized : `${normalized}/v1/logs`
-}
+const logsEndpoint = (endpoint: string): string =>
+  endpoint.endsWith("/v1/logs") ? endpoint : `${endpoint}/v1/logs`
 
 interface OpenCodePluginInput {
   readonly environment?: Readonly<Record<string, string | undefined>>
+  readonly fetch?: typeof globalThis.fetch
 }
 
 interface OpenCodeEventInput {
   readonly event: unknown
 }
 
-export const LumenSync = async (
-  input: OpenCodePluginInput = {},
-): Promise<{ readonly event?: (input: OpenCodeEventInput) => Promise<void> }> => {
-  const environment =
-    input.environment ??
-    (typeof process === "undefined"
-      ? {}
-      : (process.env as Readonly<Record<string, string | undefined>>))
-  const endpoint =
-    environment.LUMEN_COLLECTOR_OTLP_ENDPOINT ?? environment.OTEL_EXPORTER_OTLP_ENDPOINT
-  if (endpoint === undefined || endpoint.length === 0) return {}
+const optionalEnvironment = (name: string) =>
+  Config.option(Config.string(name)).pipe(Effect.map(Option.getOrUndefined))
 
-  const state = makeOpenCodeUsageState()
-  return {
-    event: async ({ event }) => {
-      const usage = usageFromOpenCodeEvent(event, state)
-      if (usage.length === 0) return
-      try {
-        const response = await fetch(logsEndpoint(endpoint), {
-          body: JSON.stringify(toOtlpLogs(usage)),
-          headers: { "content-type": "application/json" },
-          method: "POST",
-        })
-        if (!response.ok) {
-          throw new Error(`Lumen Sync collector rejected OpenCode usage (${response.status})`)
-        }
-      } catch (cause) {
-        releaseUsageForRetry(state, usage)
-        throw cause
+const normalizedEndpoint = Effect.fn("OpenCode.normalizedEndpoint")(function* () {
+  const configured =
+    (yield* optionalEnvironment("LUMEN_COLLECTOR_OTLP_ENDPOINT")) ??
+    (yield* optionalEnvironment("OTEL_EXPORTER_OTLP_ENDPOINT"))
+  if (configured === undefined || configured.length === 0) return undefined
+  return yield* Effect.try({
+    try: () => {
+      const url = new URL(configured)
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        throw new Error("collector endpoint must use HTTP or HTTPS")
       }
+      url.hash = ""
+      url.search = ""
+      return url.toString().replace(/\/+$/u, "")
+    },
+    catch: (cause) =>
+      new Error(
+        `Invalid OpenCode collector endpoint: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      ),
+  })
+})
+
+const definedEnvironment = (
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  )
+
+const makePlugin = Effect.fn("OpenCode.makePlugin")(function* (
+  fetchImplementation?: typeof globalThis.fetch,
+) {
+  const endpoint = yield* normalizedEndpoint()
+  if (endpoint === undefined) return {}
+
+  const client = yield* HttpClient.HttpClient
+  const state = makeOpenCodeUsageState()
+  const exportUsage = Effect.fn("OpenCode.exportUsage")(function* (
+    usage: ReadonlyArray<AssistantUsage>,
+  ) {
+    const request = yield* HttpClientRequest.bodyJson(
+      HttpClientRequest.post(logsEndpoint(endpoint)),
+      toOtlpLogs(usage),
+    ).pipe(
+      Effect.mapError((error) => new Error(`Could not encode OpenCode usage: ${error.message}`)),
+    )
+    const response = yield* client.execute(request).pipe(
+      Effect.mapError((error) => {
+        if (error.response !== undefined) {
+          return new Error(
+            `Lumen Sync collector rejected OpenCode usage (${error.response.status})`,
+          )
+        }
+        const cause = "cause" in error.reason ? error.reason.cause : undefined
+        return cause instanceof Error
+          ? cause
+          : new Error(`Could not reach the Lumen Sync collector: ${error.message}`)
+      }),
+    )
+    if (response.status < 200 || response.status >= 300) {
+      return yield* Effect.fail(
+        new Error(`Lumen Sync collector rejected OpenCode usage (${response.status})`),
+      )
+    }
+  })
+
+  return {
+    event: ({ event }: OpenCodeEventInput): Promise<void> => {
+      const usage = usageFromOpenCodeEvent(event, state)
+      if (usage.length === 0) return Promise.resolve()
+      const request = exportUsage(usage).pipe(
+        Effect.tapError(() => Effect.sync(() => releaseUsageForRetry(state, usage))),
+      )
+      return Effect.runPromise(
+        fetchImplementation === undefined
+          ? request
+          : request.pipe(Effect.provideService(FetchHttpClient.Fetch, fetchImplementation)),
+      )
     },
   }
+})
+
+export const LumenSync = (
+  input: OpenCodePluginInput = {},
+): Promise<{ readonly event?: (input: OpenCodeEventInput) => Promise<void> }> => {
+  const program =
+    input.environment === undefined
+      ? makePlugin(input.fetch)
+      : makePlugin(input.fetch).pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: definedEnvironment(input.environment),
+              }),
+            ),
+          ),
+        )
+  return Effect.runPromise(program.pipe(Effect.provide(FetchHttpClient.layer)))
 }

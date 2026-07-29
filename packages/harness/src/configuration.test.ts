@@ -2,14 +2,33 @@ import { expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 
 import { prepareConfiguration, prepareRemoval } from "./configuration"
-import { HarnessConfigurationConflict, type Harness } from "./model"
+import { HarnessConfigurationConflict, harnesses, harnessRegistry, type Harness } from "./model"
 import { makeHarnessPaths } from "./paths"
 
 const collectorUrl = "https://collector.lumen.build"
 
+it("registers every supported harness and its integration shape", () => {
+  expect(harnesses.map(({ id }) => id)).toEqual([
+    "claude",
+    "codex",
+    "copilot",
+    "gemini",
+    "opencode",
+    "vscode",
+  ])
+  expect(harnessRegistry.opencode).toMatchObject({
+    format: "jsonc",
+    integration: "opencode-plugin",
+    signals: ["logs"],
+  })
+  expect(
+    harnesses.filter(({ integration }) => integration === "native-otel").map(({ id }) => id),
+  ).toEqual(["claude", "codex", "copilot", "gemini", "vscode"])
+})
+
 it.effect("configures every harness without adding a default collector", () =>
   Effect.gen(function* () {
-    const harnesses: ReadonlyArray<Harness> = [
+    const supportedHarnesses: ReadonlyArray<Harness> = [
       "claude",
       "codex",
       "copilot",
@@ -17,7 +36,7 @@ it.effect("configures every harness without adding a default collector", () =>
       "opencode",
       "vscode",
     ]
-    for (const harness of harnesses) {
+    for (const harness of supportedHarnesses) {
       const configured = yield* prepareConfiguration({
         collectorUrl,
         contents: "",
