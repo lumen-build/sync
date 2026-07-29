@@ -2,8 +2,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, it } from "@effect/vitest"
 import { Effect, Redacted } from "effect"
+import { FetchHttpClient } from "effect/unstable/http"
 
 import { browserCommand, environmentAssertionLayer, fileSecretStoreLayer } from "./adapters"
 import { AssertionProvider, SecretStore } from "./ports"
@@ -27,6 +29,7 @@ it.effect("uses an explicit CI OIDC assertion without exposing it", () =>
         LUMEN_OIDC_ASSERTION: "mocked-assertion",
       }),
     ),
+    Effect.provide(FetchHttpClient.layer),
   ),
 )
 
@@ -41,7 +44,10 @@ it.effect("persists refresh tokens in a private file-backed store", () =>
         expect(yield* store.get("refresh")).toBe("mocked-refresh")
         yield* store.remove("refresh")
         expect(yield* store.get("refresh")).toBeUndefined()
-      }).pipe(Effect.provide(fileSecretStoreLayer(join(directory, "nested", "secrets.json")))),
+      }).pipe(
+        Effect.provide(fileSecretStoreLayer(join(directory, "nested", "secrets.json"))),
+        Effect.provide(BunServices.layer),
+      ),
     (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
   ),
 )

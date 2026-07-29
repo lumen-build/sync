@@ -108,7 +108,9 @@ const credentialLayer = (
       })
     }
 
-    const receiver = localAuthorizationCodeReceiverLayer
+    const receiver = localAuthorizationCodeReceiverLayer({
+      platform: process.platform as "darwin" | "linux" | "win32",
+    })
     const assertions = environmentAssertionLayer(environment)
     const secrets = fileSecretStoreLayer(join(dirname(configPath), "credentials.json"))
     const oidc = liveOidcClientLayer.pipe(Layer.provide(receiver))

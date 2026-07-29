@@ -1,6 +1,7 @@
 import { UsagePrincipal } from "@lumen-build/sync-contracts"
 import type { UsagePrincipal as UsagePrincipalType } from "@lumen-build/sync-contracts"
 import { Context, Effect, Layer, Redacted, Schema } from "effect"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { createRemoteJWKSet, jwtVerify } from "jose"
 
 import { AuthenticationFailed } from "./errors.js"
@@ -9,10 +10,10 @@ import { discover } from "./oidc-client.js"
 const AUTHENTICATOR_REQUEST_TIMEOUT = "30 seconds"
 const AUTHENTICATOR_REQUEST_TIMEOUT_MILLIS = 30_000
 
-const withAuthenticationDeadline = <A>(
+const withAuthenticationDeadline = <A, R>(
   operation: string,
-  request: Effect.Effect<A, AuthenticationFailed>,
-): Effect.Effect<A, AuthenticationFailed> =>
+  request: Effect.Effect<A, AuthenticationFailed, R>,
+): Effect.Effect<A, AuthenticationFailed, R> =>
   request.pipe(
     Effect.timeoutOrElse({
       duration: AUTHENTICATOR_REQUEST_TIMEOUT,
@@ -44,7 +45,11 @@ export interface OidcJwtAuthenticatorOptions {
 export const oidcJwtAuthenticatorLayer = ({
   audience,
   issuer,
-}: OidcJwtAuthenticatorOptions): Layer.Layer<RequestAuthenticator, AuthenticationFailed> =>
+}: OidcJwtAuthenticatorOptions): Layer.Layer<
+  RequestAuthenticator,
+  AuthenticationFailed,
+  HttpClient.HttpClient
+> =>
   Layer.effect(
     RequestAuthenticator,
     Effect.gen(function* () {
@@ -131,15 +136,17 @@ export const oidcIntrospectionAuthenticatorLayer = ({
   subjectClaim,
 }: OidcIntrospectionAuthenticatorOptions): Layer.Layer<
   RequestAuthenticator,
-  AuthenticationFailed
+  AuthenticationFailed,
+  HttpClient.HttpClient
 > =>
   Layer.effect(
     RequestAuthenticator,
     Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient
       const configuredIssuer = typeof issuer === "string" ? issuer : issuer()
       const discovery = yield* withAuthenticationDeadline(
         "RequestAuthenticator.introspection.discover",
-        discover(configuredIssuer),
+        discover(configuredIssuer).pipe(Effect.provideService(HttpClient.HttpClient, client)),
       )
       if (discovery.introspection_endpoint === undefined) {
         return yield* new AuthenticationFailed({
@@ -156,39 +163,38 @@ export const oidcIntrospectionAuthenticatorLayer = ({
         if (clientId !== undefined) body.set("client_id", clientId)
         const json = yield* withAuthenticationDeadline(
           "RequestAuthenticator.introspection.request",
-          Effect.tryPromise({
-            try: async (signal) => {
-              const response = await fetch(endpoint, {
-                body,
-                headers: {
-                  accept: "application/json",
-                  "content-type": "application/x-www-form-urlencoded",
-                },
-                method: "POST",
-                signal,
+          Effect.gen(function* () {
+            const response = yield* client
+              .execute(
+                HttpClientRequest.post(endpoint).pipe(
+                  HttpClientRequest.acceptJson,
+                  HttpClientRequest.bodyUrlParams(body),
+                ),
+              )
+              .pipe(
+                Effect.mapError(
+                  (error) =>
+                    new AuthenticationFailed({
+                      operation: "RequestAuthenticator.introspection.request",
+                      reason: error.message,
+                    }),
+                ),
+              )
+            if (response.status < 200 || response.status >= 300) {
+              return yield* new AuthenticationFailed({
+                operation: "RequestAuthenticator.introspection.request",
+                reason: `HTTP ${response.status}`,
               })
-              if (!response.ok) {
-                throw new AuthenticationFailed({
-                  operation: "RequestAuthenticator.introspection.request",
-                  reason: `HTTP ${response.status}`,
-                })
-              }
-              try {
-                return await response.json()
-              } catch (cause) {
-                throw new AuthenticationFailed({
-                  operation: "RequestAuthenticator.introspection.decodeJson",
-                  reason: cause instanceof Error ? cause.message : String(cause),
-                })
-              }
-            },
-            catch: (cause) =>
-              cause instanceof AuthenticationFailed
-                ? cause
-                : new AuthenticationFailed({
-                    operation: "RequestAuthenticator.introspection.request",
-                    reason: cause instanceof Error ? cause.message : String(cause),
+            }
+            return yield* response.json.pipe(
+              Effect.mapError(
+                (error) =>
+                  new AuthenticationFailed({
+                    operation: "RequestAuthenticator.introspection.decodeJson",
+                    reason: error.message,
                   }),
+              ),
+            )
           }),
         )
         const claims = yield* Schema.decodeUnknownEffect(IntrospectionClaims)(json).pipe(

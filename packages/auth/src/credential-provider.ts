@@ -1,5 +1,5 @@
 import type { OidcConfiguration } from "@lumen-build/sync-config"
-import { Context, Effect, Layer, Redacted, Ref, Semaphore } from "effect"
+import { Clock, Context, Effect, Layer, Redacted, Ref, Semaphore } from "effect"
 
 import type { AuthenticationFailed, MissingCredential, SecretStoreError } from "./errors.js"
 import { AssertionProvider, OidcClient, SecretStore } from "./ports.js"
@@ -88,7 +88,8 @@ export const oidcCredentialLayer = ({
         accessLock.withPermit(
           Effect.gen(function* () {
             const current = yield* Ref.get(cached)
-            if (current !== undefined && current.expiresAt > Date.now() + 30_000) {
+            const now = yield* Clock.currentTimeMillis
+            if (current !== undefined && current.expiresAt > now + 30_000) {
               return current.accessToken
             }
 

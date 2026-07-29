@@ -1,5 +1,17 @@
 import type { OidcConfiguration } from "@lumen-build/sync-config"
-import { Context, Effect, Layer, Redacted, Ref, Schema, Semaphore } from "effect"
+import {
+  Clock,
+  Context,
+  Crypto,
+  Effect,
+  Encoding,
+  Layer,
+  Redacted,
+  Ref,
+  Schema,
+  Semaphore,
+} from "effect"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 
 import { AuthenticationFailed } from "./errors.js"
 import { OidcClient } from "./ports.js"
@@ -62,51 +74,41 @@ const withRequestDeadline = <A>(
 
 const requestJson = Effect.fn("OidcClient.requestJson")(function* (
   operation: string,
-  url: string,
-  init?: RequestInit,
+  request: HttpClientRequest.HttpClientRequest,
 ) {
+  const client = yield* HttpClient.HttpClient
   return yield* withRequestDeadline(
     operation,
-    Effect.tryPromise({
-      try: async (signal) => {
-        const response = await fetch(url, { ...init, signal })
-        if (!response.ok) {
-          let body = ""
-          try {
-            body = await response.text()
-          } catch {
-            // The status is sufficient evidence when an error body cannot be read.
-          }
-          throw authenticationFailed(
-            operation,
-            `HTTP ${response.status}${body.length === 0 ? "" : `: ${body.slice(0, 512)}`}`,
-          )
-        }
-        try {
-          return await response.json()
-        } catch (cause) {
-          throw authenticationFailed(`${operation}.decodeJson`, cause)
-        }
-      },
-      catch: (cause) =>
-        cause instanceof AuthenticationFailed ? cause : authenticationFailed(operation, cause),
+    Effect.gen(function* () {
+      const response = yield* client
+        .execute(HttpClientRequest.acceptJson(request))
+        .pipe(Effect.mapError((error) => authenticationFailed(operation, error)))
+      if (response.status < 200 || response.status >= 300) {
+        const body = yield* response.text.pipe(Effect.orElseSucceed(() => ""))
+        return yield* authenticationFailed(
+          operation,
+          `HTTP ${response.status}${body.length === 0 ? "" : `: ${body.slice(0, 512)}`}`,
+        )
+      }
+      return yield* response.json.pipe(
+        Effect.mapError((error) => authenticationFailed(`${operation}.decodeJson`, error)),
+      )
     }),
   )
 })
 
 const requestVoid = Effect.fn("OidcClient.requestVoid")(function* (
   operation: string,
-  url: string,
-  init: RequestInit,
+  request: HttpClientRequest.HttpClientRequest,
 ) {
+  const client = yield* HttpClient.HttpClient
   const response = yield* withRequestDeadline(
     operation,
-    Effect.tryPromise({
-      try: (signal) => fetch(url, { ...init, signal }),
-      catch: (cause) => authenticationFailed(operation, cause),
-    }),
+    client
+      .execute(request)
+      .pipe(Effect.mapError((error) => authenticationFailed(operation, error))),
   )
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     return yield* Effect.fail(authenticationFailed(operation, `HTTP ${response.status}`))
   }
 })
@@ -116,7 +118,7 @@ export const discover = Effect.fn("OidcClient.discover")(function* (issuer: stri
     ".well-known/openid-configuration",
     issuer.endsWith("/") ? issuer : `${issuer}/`,
   )
-  const json = yield* requestJson("OidcClient.discover", url.toString())
+  const json = yield* requestJson("OidcClient.discover", HttpClientRequest.get(url))
   const document = yield* Schema.decodeUnknownEffect(DiscoveryDocument)(json).pipe(
     Effect.mapError((error) => authenticationFailed("OidcClient.decodeDiscovery", error)),
   )
@@ -131,45 +133,39 @@ export const discover = Effect.fn("OidcClient.discover")(function* (issuer: stri
   return document
 })
 
-const base64Url = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url")
-
 const randomValue = Effect.fn("OidcClient.randomValue")(function* () {
-  const bytes = new Uint8Array(32)
-  yield* Effect.try({
-    try: () => crypto.getRandomValues(bytes),
-    catch: (cause) => authenticationFailed("OidcClient.randomValue", cause),
-  })
-  return base64Url(bytes)
+  const crypto = yield* Crypto.Crypto
+  const bytes = yield* crypto
+    .randomBytes(32)
+    .pipe(Effect.mapError((error) => authenticationFailed("OidcClient.randomValue", error)))
+  return Encoding.encodeBase64Url(bytes)
 })
 
 const codeChallenge = Effect.fn("OidcClient.codeChallenge")(function* (verifier: string) {
-  const digest = yield* Effect.tryPromise({
-    try: () => crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
-    catch: (cause) => authenticationFailed("OidcClient.codeChallenge", cause),
-  })
-  return base64Url(new Uint8Array(digest))
+  const crypto = yield* Crypto.Crypto
+  const digest = yield* crypto
+    .digest("SHA-256", new TextEncoder().encode(verifier))
+    .pipe(Effect.mapError((error) => authenticationFailed("OidcClient.codeChallenge", error)))
+  return Encoding.encodeBase64Url(digest)
 })
 
 const requestToken = Effect.fn("OidcClient.requestToken")(function* (
   endpoint: string,
   body: URLSearchParams,
 ) {
-  const json = yield* requestJson("OidcClient.token", endpoint, {
-    body,
-    headers: {
-      accept: "application/json",
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    method: "POST",
-  })
+  const json = yield* requestJson(
+    "OidcClient.token",
+    HttpClientRequest.post(endpoint).pipe(HttpClientRequest.bodyUrlParams(body)),
+  )
   const token = yield* Schema.decodeUnknownEffect(TokenResponse)(json).pipe(
     Effect.mapError((error) => authenticationFailed("OidcClient.decodeToken", error)),
   )
+  const now = yield* Clock.currentTimeMillis
   return {
     accessToken: Redacted.make(token.access_token),
     ...(token.expires_in === undefined
       ? {}
-      : { expiresAt: Date.now() + Math.max(0, token.expires_in) * 1_000 }),
+      : { expiresAt: now + Math.max(0, token.expires_in) * 1_000 }),
     ...(token.refresh_token === undefined
       ? {}
       : { refreshToken: Redacted.make(token.refresh_token) }),
@@ -179,16 +175,31 @@ const requestToken = Effect.fn("OidcClient.requestToken")(function* (
 export const liveOidcClientLayer = Layer.effect(
   OidcClient,
   Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto
+    const httpClient = yield* HttpClient.HttpClient
     const receiver = yield* AuthorizationCodeReceiver
     const discoveryCache = yield* Ref.make(new Map<string, DiscoveryDocument>())
     const discoveryLock = yield* Semaphore.make(1)
+    const discoverWithRuntime = (issuer: string) =>
+      discover(issuer).pipe(Effect.provideService(HttpClient.HttpClient, httpClient))
+    const randomValueWithRuntime = () =>
+      randomValue().pipe(Effect.provideService(Crypto.Crypto, crypto))
+    const codeChallengeWithRuntime = (verifier: string) =>
+      codeChallenge(verifier).pipe(Effect.provideService(Crypto.Crypto, crypto))
+    const requestTokenWithRuntime = (endpoint: string, body: URLSearchParams) =>
+      requestToken(endpoint, body).pipe(Effect.provideService(HttpClient.HttpClient, httpClient))
+    const requestVoidWithRuntime = (
+      operation: string,
+      request: HttpClientRequest.HttpClientRequest,
+    ) =>
+      requestVoid(operation, request).pipe(Effect.provideService(HttpClient.HttpClient, httpClient))
     const cachedDiscovery = Effect.fn("OidcClient.cachedDiscovery")((issuer: string) =>
       discoveryLock.withPermit(
         Effect.gen(function* () {
           const key = issuer.replace(/\/$/u, "")
           const cached = (yield* Ref.get(discoveryCache)).get(key)
           if (cached !== undefined) return cached
-          const document = yield* discover(issuer)
+          const document = yield* discoverWithRuntime(issuer)
           yield* Ref.update(discoveryCache, (current) => new Map(current).set(key, document))
           return document
         }),
@@ -197,10 +208,10 @@ export const liveOidcClientLayer = Layer.effect(
 
     const authorize = Effect.fn("OidcClient.authorize")(function* (config: OidcConfiguration) {
       const discovery = yield* cachedDiscovery(config.issuer)
-      const verifier = yield* randomValue()
-      const challenge = yield* codeChallenge(verifier)
-      const state = yield* randomValue()
-      const nonce = yield* randomValue()
+      const verifier = yield* randomValueWithRuntime()
+      const challenge = yield* codeChallengeWithRuntime(verifier)
+      const state = yield* randomValueWithRuntime()
+      const nonce = yield* randomValueWithRuntime()
       const authorizationUrl = new URL(discovery.authorization_endpoint)
       authorizationUrl.searchParams.set("client_id", config.clientId)
       authorizationUrl.searchParams.set("code_challenge", challenge)
@@ -237,7 +248,7 @@ export const liveOidcClientLayer = Layer.effect(
         redirect_uri: config.redirectUri,
       })
       if (config.audience !== undefined) body.set("aud", config.audience)
-      return yield* requestToken(discovery.token_endpoint, body)
+      return yield* requestTokenWithRuntime(discovery.token_endpoint, body)
     })
 
     const exchangeAssertion = Effect.fn("OidcClient.exchangeAssertion")(function* (
@@ -252,7 +263,7 @@ export const liveOidcClientLayer = Layer.effect(
         scope: config.scopes.join(" "),
       })
       if (config.audience !== undefined) body.set("aud", config.audience)
-      return yield* requestToken(discovery.token_endpoint, body)
+      return yield* requestTokenWithRuntime(discovery.token_endpoint, body)
     })
 
     const refresh = Effect.fn("OidcClient.refresh")(function* (
@@ -265,7 +276,7 @@ export const liveOidcClientLayer = Layer.effect(
         grant_type: "refresh_token",
         refresh_token: Redacted.value(refreshToken),
       })
-      return yield* requestToken(discovery.token_endpoint, body)
+      return yield* requestTokenWithRuntime(discovery.token_endpoint, body)
     })
 
     const revoke = Effect.fn("OidcClient.revoke")(function* (
@@ -274,16 +285,17 @@ export const liveOidcClientLayer = Layer.effect(
     ) {
       const discovery = yield* cachedDiscovery(config.issuer)
       if (discovery.revocation_endpoint === undefined) return
-      yield* requestVoid("OidcClient.revoke", discovery.revocation_endpoint, {
-        body: new URLSearchParams({
-          client_id: config.clientId,
-          token: Redacted.value(token),
-        }),
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        method: "POST",
-      })
+      yield* requestVoidWithRuntime(
+        "OidcClient.revoke",
+        HttpClientRequest.post(discovery.revocation_endpoint).pipe(
+          HttpClientRequest.bodyUrlParams(
+            new URLSearchParams({
+              client_id: config.clientId,
+              token: Redacted.value(token),
+            }),
+          ),
+        ),
+      )
     })
 
     return OidcClient.of({ authorize, exchangeAssertion, refresh, revoke })

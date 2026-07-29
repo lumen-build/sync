@@ -25,6 +25,9 @@
         "effect": "4.0.0-beta.102",
         "jose": "6.2.4",
       },
+      "devDependencies": {
+        "@effect/platform-bun": "4.0.0-beta.102",
+      },
     },
     "packages/ccusage": {
       "name": "@lumen-build/sync-ccusage",

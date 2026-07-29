@@ -34,6 +34,7 @@ export {
   fileSecretStoreLayer,
   localAuthorizationCodeReceiverLayer,
 } from "./adapters.js"
+export type { HostPlatform, LocalAuthorizationCodeReceiverOptions } from "./adapters.js"
 export type {
   BearerAuthenticatorOptions,
   Interface as RequestAuthenticatorInterface,

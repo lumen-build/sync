@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test"
 import { createServer } from "node:net"
 
+import * as BunServices from "@effect/platform-bun/BunServices"
 import { Effect } from "effect"
 
 import { localAuthorizationCodeReceiverLayer } from "./adapters"
@@ -43,7 +44,10 @@ test("keeps waiting after uncorrelated callbacks and accepts a later matching ca
       Effect.gen(function* () {
         const receiver = yield* AuthorizationCodeReceiver
         return yield* receiver.authorize(authorizationUrl.toString(), expectedState)
-      }).pipe(Effect.provide(localAuthorizationCodeReceiverLayer)),
+      }).pipe(
+        Effect.provide(localAuthorizationCodeReceiverLayer({ platform: "linux" })),
+        Effect.provide(BunServices.layer),
+      ),
       { signal: cancellation.signal },
     )
     const outcome = authorization.then(
