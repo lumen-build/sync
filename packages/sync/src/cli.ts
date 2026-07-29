@@ -172,9 +172,10 @@ const credentialLayer = (
     }
 
     const receiver = localAuthorizationCodeReceiverLayer({ platform })
-    const assertions = environmentAssertionLayer(environment)
+    const httpClient = BunHttpClient.layer
+    const assertions = environmentAssertionLayer(environment).pipe(Layer.provide(httpClient))
     const secrets = fileSecretStoreLayer(paths.credentialsFile)
-    const oidc = liveOidcClientLayer.pipe(Layer.provide(receiver))
+    const oidc = liveOidcClientLayer.pipe(Layer.provide(Layer.merge(receiver, httpClient)))
     return oidcCredentialLayer({
       config: auth.oidc,
       credentialKeyPrefix: "lumen.sync",
