@@ -43,7 +43,7 @@ it.effect("renders user-scoped systemd commands and escapes specifiers", () =>
 
     expect(definition.artifact.path).toBe("/home/dev/.config/systemd/user/lumen-sync.service")
     expect(definition.artifact.contents).toContain(
-      'ExecStart="/home/dev/.local/bin/lumen sync" "collector" "start"',
+      'ExecStart="/home/dev/.local/bin/lumen sync" "collector" "run"',
     )
     expect(definition.artifact.contents).toContain("config%%20.toml")
     expect(definition.install).toContainEqual({

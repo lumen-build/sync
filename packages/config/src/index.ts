@@ -321,6 +321,7 @@ export interface RuntimePaths {
   readonly credentialsFile: string
   readonly dailySyncDirectory: string
   readonly deviceIdFile: string
+  readonly harnessOwnershipFile: string
   readonly serviceStateDirectory: string
   readonly stateDirectory: string
 }
@@ -412,6 +413,7 @@ export const resolveRuntimePaths = ({
     credentialsFile: joinHost(host.platform, dataDirectory, "credentials.json"),
     dailySyncDirectory: joinHost(host.platform, stateDirectory, "daily-sync"),
     deviceIdFile: joinHost(host.platform, dataDirectory, "device-id"),
+    harnessOwnershipFile: joinHost(host.platform, configDirectory, "harness-ownership.json"),
     serviceStateDirectory: joinHost(host.platform, stateDirectory, "service"),
     stateDirectory,
   }
@@ -608,6 +610,7 @@ export class Service extends Context.Service<Service, Interface>()(
 export interface LayerOptions {
   readonly configPath?: string | undefined
   readonly host: RuntimeHost
+  readonly paths?: RuntimePaths
 }
 
 const configuredPath = Effect.fn("Configuration.configuredPath")(function* (
@@ -620,6 +623,7 @@ const configuredPath = Effect.fn("Configuration.configuredPath")(function* (
 export const layer = ({
   configPath,
   host,
+  paths: resolvedPaths,
 }: LayerOptions): Layer.Layer<
   Service,
   ConfigurationFileError | InvalidConfiguration | MissingConfiguration,
@@ -629,10 +633,12 @@ export const layer = ({
     Service,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
-      const paths = resolveRuntimePaths({
-        configPath: yield* configuredPath(configPath),
-        host,
-      })
+      const paths =
+        resolvedPaths ??
+        resolveRuntimePaths({
+          configPath: yield* configuredPath(configPath),
+          host,
+        })
       const configuration = yield* load({ path: paths.configFile })
       const reload = Effect.fn("Configuration.reload")(function* () {
         return yield* load({ path: paths.configFile }).pipe(

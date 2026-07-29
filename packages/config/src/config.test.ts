@@ -226,6 +226,7 @@ it("separates default state and data while isolating explicit configuration", ()
     credentialsFile: "/home/dev/.local/share/lumen-build/sync/credentials.json",
     dailySyncDirectory: "/home/dev/.local/state/lumen-build/sync/daily-sync",
     deviceIdFile: "/home/dev/.local/share/lumen-build/sync/device-id",
+    harnessOwnershipFile: "/home/dev/.config/lumen-build/sync/harness-ownership.json",
     serviceStateDirectory: "/home/dev/.local/state/lumen-build/sync/service",
     stateDirectory: "/home/dev/.local/state/lumen-build/sync",
   })
@@ -242,6 +243,7 @@ it("separates default state and data while isolating explicit configuration", ()
     credentialsFile: "/tmp/lumen/credentials.json",
     dailySyncDirectory: "/tmp/lumen/state/daily-sync",
     deviceIdFile: "/tmp/lumen/device-id",
+    harnessOwnershipFile: "/tmp/lumen/harness-ownership.json",
     serviceStateDirectory: "/tmp/lumen/state/service",
     stateDirectory: "/tmp/lumen/state",
   })

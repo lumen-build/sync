@@ -9,8 +9,9 @@ import { expect, it } from "@effect/vitest"
 import { Effect, Fiber, Layer, Ref } from "effect"
 import { TestClock } from "effect/testing"
 
-import { makeFileDailySyncIdJournal } from "./sync-id-journal"
+import { bunDailySyncIdJournalLayer } from "./platform-bun"
 import {
+  DailySyncIdJournalFactory,
   InvalidUploadInterval,
   parseCollectorAddress,
   runCollector,
@@ -122,7 +123,8 @@ it.effect(
         }
 
         return Effect.gen(function* () {
-          const firstJournal = makeFileDailySyncIdJournal(directory)
+          const journals = yield* DailySyncIdJournalFactory
+          const firstJournal = journals.make(directory)
           yield* syncDaily({ ...options, syncIds: firstJournal }).pipe(Effect.flip)
           const pending = yield* Effect.promise(() => readdir(directory))
           expect(pending).toHaveLength(1)
@@ -130,14 +132,18 @@ it.effect(
             (yield* Effect.promise(() => stat(join(directory, pending[0]!)))).mode & 0o777,
           ).toBe(0o600)
 
-          const secondJournal = makeFileDailySyncIdJournal(directory)
+          const secondJournal = journals.make(directory)
           const result = yield* syncDaily({ ...options, syncIds: secondJournal })
 
           expect(attemptedSyncIds).toHaveLength(2)
           expect(attemptedSyncIds[1]).toBe(attemptedSyncIds[0])
           expect(result).toMatchObject([{ committed: 1, syncId: attemptedSyncIds[0] }])
           expect(yield* Effect.promise(() => readdir(directory))).toEqual([])
-        }).pipe(Effect.provide(Layer.mergeAll(command, importerLayer, destination)))
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(command, importerLayer, destination, bunDailySyncIdJournalLayer),
+          ),
+        )
       },
       (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
     ),

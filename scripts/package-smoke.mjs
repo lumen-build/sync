@@ -35,16 +35,18 @@ try {
     "Collector",
     "Config",
     "Contracts",
+    "DeviceIdentity",
     "Destination",
     "Harness",
     "Otlp",
     "Reconciliation",
     "Runtime",
     "Service",
-    "SyncIdJournal",
   ]) {
     if (!(name in api)) throw new Error(`published API is missing ${name}`)
   }
+  await import(pathToFileURL(join(installed, "dist", "bun.js")).href)
+  await import(pathToFileURL(join(installed, "dist", "contracts.js")).href)
   await import(pathToFileURL(join(installed, "dist", "opencode.js")).href)
   process.stdout.write(`Package smoke passed: ${filename}\n`)
 } finally {

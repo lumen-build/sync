@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto"
 import { constants } from "node:fs"
 import { link, mkdir, open, rm, unlink } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
-import { SyncId } from "@lumen-build/sync-contracts"
-import { Effect, Schema } from "effect"
+import { DeviceId, SyncId } from "@lumen-build/sync-contracts"
+import { Effect, Layer, Schema } from "effect"
 
-import { DailySyncIdJournalError, type DailySyncIdJournal, type DailySyncIdKey } from "./runtime"
+import { DeviceIdentity, DeviceIdentityError } from "./device-identity"
+import {
+  DailySyncIdJournalError,
+  DailySyncIdJournalFactory,
+  type DailySyncIdJournal,
+  type DailySyncIdKey,
+} from "./runtime"
 
 interface JournalEntry {
   readonly key: DailySyncIdKey
@@ -99,7 +105,7 @@ const persistEntry = async (
   }
 }
 
-export const makeFileDailySyncIdJournal = (directory: string): DailySyncIdJournal => ({
+const makeFileDailySyncIdJournal = (directory: string): DailySyncIdJournal => ({
   getOrCreate: (key) =>
     Effect.tryPromise({
       try: async () => {
@@ -132,3 +138,70 @@ export const makeFileDailySyncIdJournal = (directory: string): DailySyncIdJourna
       catch: (cause) => journalError("remove daily sync ID", cause),
     }),
 })
+
+export const bunDailySyncIdJournalLayer = Layer.succeed(
+  DailySyncIdJournalFactory,
+  DailySyncIdJournalFactory.of({ make: makeFileDailySyncIdJournal }),
+)
+
+const deviceError = (path: string, cause: unknown): DeviceIdentityError =>
+  new DeviceIdentityError({
+    path,
+    reason: cause instanceof Error ? cause.message : String(cause),
+  })
+
+const readDeviceId = async (path: string): Promise<string | undefined> => {
+  try {
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const metadata = await handle.stat()
+      if (!metadata.isFile()) throw new Error(`device identity is not a regular file: ${path}`)
+      if ((metadata.mode & 0o777) !== 0o600) await handle.chmod(0o600)
+      const value = (await handle.readFile("utf8")).trim()
+      if (!Schema.is(DeviceId)(value)) throw new Error(`invalid device identity at ${path}`)
+      return value
+    } finally {
+      await handle.close()
+    }
+  } catch (cause) {
+    if (isMissing(cause)) return undefined
+    throw cause
+  }
+}
+
+const persistDeviceId = async (path: string, value: string): Promise<string> => {
+  await mkdir(dirname(path), { mode: 0o700, recursive: true })
+  try {
+    const handle = await open(path, "wx", 0o600)
+    try {
+      await handle.writeFile(`${value}\n`, "utf8")
+      await handle.chmod(0o600)
+      await handle.sync()
+      return value
+    } finally {
+      await handle.close()
+    }
+  } catch (cause) {
+    if (!isExisting(cause)) throw cause
+    const existing = await readDeviceId(path)
+    if (existing === undefined) return persistDeviceId(path, value)
+    return existing
+  }
+}
+
+export const bunDeviceIdentityLayer = Layer.succeed(
+  DeviceIdentity,
+  DeviceIdentity.of({
+    loadOrCreate: (path) =>
+      Effect.tryPromise({
+        try: async () => {
+          const existing = await readDeviceId(path)
+          if (existing !== undefined) return existing
+          return persistDeviceId(path, crypto.randomUUID())
+        },
+        catch: (cause) => deviceError(path, cause),
+      }),
+  }),
+)
+
+export const bunSyncPlatformLayer = Layer.merge(bunDailySyncIdJournalLayer, bunDeviceIdentityLayer)

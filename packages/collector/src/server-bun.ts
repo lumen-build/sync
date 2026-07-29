@@ -23,7 +23,7 @@ export const bunCollectorServerLayer: Layer.Layer<CollectorServer, never, Collec
               }),
             catch: serverError,
           }),
-          (server) => Effect.sync(() => server.stop(true)),
+          (server) => Effect.promise(() => server.stop(true)),
         ).pipe(
           Effect.flatMap((server) =>
             server.port === undefined

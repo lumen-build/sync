@@ -45,6 +45,8 @@ export interface ServiceDefinition {
   readonly uninstall: ReadonlyArray<ServiceCommand>
 }
 
+export type ServiceStatus = "absent" | "exact" | "modified"
+
 export interface DefinitionOptions {
   readonly configPath: string
   readonly executablePath: string
@@ -170,7 +172,7 @@ const launchdDefinition = (
     "  <array>",
     `    <string>${plist(executablePath)}</string>`,
     "    <string>collector</string>",
-    "    <string>start</string>",
+    "    <string>run</string>",
     "    <string>--config</string>",
     `    <string>${plist(configPath)}</string>`,
     "  </array>",
@@ -216,7 +218,7 @@ const systemdDefinition = (
     stderr: "journalctl --user --unit lumen-sync.service",
     stdout: "journalctl --user --unit lumen-sync.service",
   }
-  const commandArguments = [executablePath, "collector", "start", "--config", configPath]
+  const commandArguments = [executablePath, "collector", "run", "--config", configPath]
     .map(systemdArgument)
     .join(" ")
   const contents = [
@@ -260,7 +262,7 @@ const windowsDefinition = (
     stderr: joinHost(host.platform, root, "collector.stderr.log"),
     stdout: joinHost(host.platform, root, "collector.stdout.log"),
   }
-  const commandArguments = ["collector", "start", "--config", configPath]
+  const commandArguments = ["collector", "run", "--config", configPath]
     .map(windowsArgument)
     .join(" ")
   const contents = [
@@ -394,6 +396,16 @@ export const uninstallService = Effect.fn("ServiceLifecycle.uninstall")(function
     .remove(definition.artifact.path, { force: true })
     .pipe(Effect.mapError((cause) => lifecycleError("remove service definition", cause)))
   yield* runCommands(afterRemoval)
+})
+
+export const inspectService = Effect.fn("ServiceLifecycle.inspect")(function* (
+  definition: ServiceDefinition,
+) {
+  const artifact = yield* readArtifact(definition.artifact.path)
+  if (artifact === undefined) return "absent" as const
+  return artifact.contents === definition.artifact.contents
+    ? ("exact" as const)
+    : ("modified" as const)
 })
 
 const collectText = (stream: Stream.Stream<Uint8Array, unknown>) =>

@@ -6,7 +6,7 @@ import {
 } from "@lumen-build/sync-ccusage"
 import { CollectorServer, LiveUsageStore } from "@lumen-build/sync-collector"
 import { Destination } from "@lumen-build/sync-destination"
-import { Clock, Console, Effect, Ref, Schema } from "effect"
+import { Clock, Console, Context, Effect, Ref, Schema } from "effect"
 
 export interface DailySyncIdKey {
   readonly agent: CcusageAgent
@@ -30,6 +30,15 @@ export interface DailySyncIdJournal {
     syncId: string,
   ) => Effect.Effect<void, DailySyncIdJournalError>
 }
+
+export interface DailySyncIdJournalFactoryInterface {
+  readonly make: (directory: string) => DailySyncIdJournal
+}
+
+export class DailySyncIdJournalFactory extends Context.Service<
+  DailySyncIdJournalFactory,
+  DailySyncIdJournalFactoryInterface
+>()("@lumen-build/sync/DailySyncIdJournalFactory") {}
 
 export interface DailySyncOptions {
   readonly agents: ReadonlyArray<CcusageAgent>
@@ -90,16 +99,31 @@ export const syncDaily = Effect.fn("SyncRuntime.syncDaily")(function* ({
 export interface CollectorRuntimeOptions {
   readonly hostname: string
   readonly port: number
+  readonly reporter?: RuntimeReporter
   readonly uploadIntervalMilliseconds: number
 }
 
 export interface LocalCollectorRuntimeOptions {
   readonly hostname: string
   readonly port: number
+  readonly reporter?: RuntimeReporter
 }
 
 export interface LiveUploadRuntimeOptions {
+  readonly reporter?: RuntimeReporter
   readonly uploadIntervalMilliseconds: number
+}
+
+export interface RuntimeReporter {
+  readonly listening: (url: string) => Effect.Effect<void>
+  readonly uploadFailed: (error: unknown) => Effect.Effect<void>
+  readonly uploadSucceeded: (accepted: number) => Effect.Effect<void>
+}
+
+const consoleReporter: RuntimeReporter = {
+  listening: (url) => Console.log(`OTLP collector listening on ${url}`),
+  uploadFailed: (error) => Console.error("Live usage upload failed", error),
+  uploadSucceeded: (accepted) => Console.log(`Uploaded ${accepted} live usage snapshots`),
 }
 
 export class InvalidUploadInterval extends Schema.TaggedErrorClass<InvalidUploadInterval>()(
@@ -127,6 +151,7 @@ const uploadLive = Effect.fn("SyncRuntime.uploadLive")(function* (uploadedGenera
 })
 
 export const runLiveUploads = Effect.fn("SyncRuntime.runLiveUploads")(function* ({
+  reporter = consoleReporter,
   uploadIntervalMilliseconds,
 }: LiveUploadRuntimeOptions) {
   yield* validateUploadInterval(uploadIntervalMilliseconds)
@@ -137,10 +162,10 @@ export const runLiveUploads = Effect.fn("SyncRuntime.runLiveUploads")(function* 
         const result = yield* uploadLive(yield* Ref.get(uploadedGeneration))
         if (result === undefined) return
         yield* Ref.set(uploadedGeneration, result.generation)
-        yield* Console.log(`Uploaded ${result.accepted} live usage snapshots`)
+        yield* reporter.uploadSucceeded(result.accepted)
       }),
     ),
-    Effect.catch((error) => Console.error("Live usage upload failed", error)),
+    Effect.catch((error) => reporter.uploadFailed(error)),
   )
   return yield* upload.pipe(Effect.forever)
 })
@@ -148,11 +173,12 @@ export const runLiveUploads = Effect.fn("SyncRuntime.runLiveUploads")(function* 
 export const runLocalCollector = Effect.fn("SyncRuntime.runLocalCollector")(function* ({
   hostname,
   port,
+  reporter = consoleReporter,
 }: LocalCollectorRuntimeOptions) {
   return yield* Effect.gen(function* () {
     const server = yield* CollectorServer
     const address = yield* server.listen({ hostname, port })
-    yield* Console.log(`OTLP collector listening on ${address.url}`)
+    yield* reporter.listening(address.url)
     return yield* Effect.never
   }).pipe(Effect.scoped)
 })
@@ -160,14 +186,15 @@ export const runLocalCollector = Effect.fn("SyncRuntime.runLocalCollector")(func
 export const runCollector = Effect.fn("SyncRuntime.runCollector")(function* ({
   hostname,
   port,
+  reporter = consoleReporter,
   uploadIntervalMilliseconds,
 }: CollectorRuntimeOptions) {
   yield* validateUploadInterval(uploadIntervalMilliseconds)
   return yield* Effect.gen(function* () {
     const server = yield* CollectorServer
     const address = yield* server.listen({ hostname, port })
-    yield* Console.log(`OTLP collector listening on ${address.url}`)
-    return yield* runLiveUploads({ uploadIntervalMilliseconds })
+    yield* reporter.listening(address.url)
+    return yield* runLiveUploads({ reporter, uploadIntervalMilliseconds })
   }).pipe(Effect.scoped)
 })
 
