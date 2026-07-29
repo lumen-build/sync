@@ -154,14 +154,14 @@ lumen-sync harness remove
 
 Existing JSONC comments and unrelated settings are retained. Conflicting managed values require `--force`. Removal restores only values that still match what Lumen Sync wrote; user changes are preserved.
 
-| Harness            | Integration                        | Configuration                |
-| ------------------ | ---------------------------------- | ---------------------------- |
-| Claude Code        | Native OTLP metrics                | `~/.claude/settings.json`    |
-| Codex              | Native OTLP metrics                | `~/.codex/config.toml`       |
-| GitHub Copilot CLI | Native OTLP, currently best effort | `~/.copilot/settings.json`   |
-| Gemini CLI         | Native OTLP collector              | `~/.gemini/settings.json`    |
-| OpenCode           | Usage-only plugin plus ccusage     | XDG/APPDATA OpenCode config  |
-| VS Code Copilot    | Native OTLP                        | VS Code user `settings.json` |
+| Harness            | Integration                        | Configuration                | Linux E2E evidence                                                                  |
+| ------------------ | ---------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------- |
+| Claude Code        | Native OTLP metrics                | `~/.claude/settings.json`    | Real CLI, mocked model API, non-zero live usage, and non-empty ccusage daily import |
+| Codex              | Native OTLP metrics                | `~/.codex/config.toml`       | Real CLI, mocked model API, non-zero live usage, and non-empty ccusage daily import |
+| GitHub Copilot CLI | Native OTLP, currently best effort | `~/.copilot/settings.json`   | Configuration and shaped telemetry tests only; no real-CLI E2E yet                  |
+| Gemini CLI         | Native OTLP collector              | `~/.gemini/settings.json`    | Real CLI, mocked model API, and non-empty daily import; live OTLP not observed      |
+| OpenCode           | Usage-only plugin plus ccusage     | XDG/APPDATA OpenCode config  | Real CLI, packed plugin live envelope, and non-empty daily import                   |
+| VS Code Copilot    | Native OTLP                        | VS Code user `settings.json` | Configuration and shaped telemetry tests only; no headless real-client E2E yet      |
 
 Content capture is disabled. Claude and Codex are configured to send token metrics, not prompt-bearing logs. Gemini traces and prompt logging are disabled. VS Code and Copilot content capture are disabled.
 
@@ -172,6 +172,13 @@ export LUMEN_COLLECTOR_OTLP_ENDPOINT="http://127.0.0.1:4318"
 ```
 
 If the plugin cannot be used, OpenCode daily sync through ccusage remains available.
+
+The pinned OpenCode E2E proves that the installed package's plugin export emits
+a live envelope, but its first event currently reports zero token fields. The
+daily ccusage import is non-empty. Gemini CLI 0.53.0 consumes the exact managed
+telemetry configuration and creates a non-empty ccusage report, but did not
+flush native OTLP to the collector in two bounded test runs. Neither limitation
+is hidden by injecting an undocumented endpoint or by waiting indefinitely.
 
 The harness settings follow the vendors’ observability surfaces: [Claude Code](https://code.claude.com/docs/en/agent-sdk/observability), [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced), [VS Code Copilot](https://code.visualstudio.com/docs/agents/guides/monitoring-agents), [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), and [Gemini CLI](https://geminicli.com/docs/cli/telemetry/).
 
@@ -538,21 +545,37 @@ bun install
 bun run check
 bun run build
 bun run package:check
+bun run test:e2e:product
+bun run test:e2e:harness
 ```
 
-Tests cover official-shaped telemetry from all six harnesses, JSON and protobuf
-OTLP, deduplication/revisions, ccusage adapters, reconciliation policies,
-reversible harness changes, all service formats, mocked HTTP destination calls,
-and local/CI OIDC. Non-loopback test hostnames are always mocked or handled in
-memory. The only real test listeners bind to loopback.
+Fast tests cover official-shaped telemetry from all six harnesses, JSON and
+protobuf OTLP, deduplication/revisions, ccusage adapters, reconciliation
+policies, reversible harness changes, all service formats, destination HTTP
+calls, and local/CI OIDC. Non-loopback test hostnames are always mocked or
+handled in memory. The only real test listeners bind to loopback.
 
-[aimock, formerly llmock](https://aimock.copilotkit.dev/), is useful for downstream end-to-end tests that run a real agent against a deterministic model API. Lumen Sync itself never calls an inference API, so its CI mocks the boundaries it owns: OTLP, local usage reports, OAuth/OIDC, service controls, and the destination HTTP contract.
+The packed product E2E builds `@lumen-build/sync`, installs its tarball into an
+empty project, and invokes only that installed CLI. It proves explicit endpoint
+requirements, environment-over-TOML precedence, live retry/checkpoint/restart
+behavior, deduplication, a non-empty bundled ccusage import with lost-response
+replay, CI OIDC assertion exchange, and local PKCE login/refresh/revocation.
+
+The Linux real-harness matrix pins Claude Code 2.1.220, Codex 0.146.0, Gemini
+CLI 0.53.0, OpenCode 1.18.9, [aimock](https://aimock.copilotkit.dev/) 1.37.4,
+and Node 22.23.1 in a separate lockfile. Each case configures and re-inspects
+the harness through the installed CLI, sends a canary prompt to a strict local
+model mock, runs the real vendor binary, proves a non-empty daily ccusage
+import, and verifies that the destination never receives the prompt. Claude
+and Codex additionally prove non-zero native live usage; OpenCode proves a
+packed-plugin live envelope. Copilot CLI and VS Code remain outside the
+real-client matrix and are not described as real-client verified.
 
 CI runs on macOS, Linux, and Windows with Bun 1.3.4 and asserts that exact
 runtime version. It runs formatting, lint, TypeScript, Effect-specific
-diagnostics, deterministic tests, and the build. A dependent Linux job packs
-`@lumen-build/sync`, installs that tarball into an empty project, executes its
-CLI, and imports every public entry point.
+diagnostics, deterministic tests, and the build. Dependent Linux jobs pack and
+install `@lumen-build/sync`, run the product E2E, and execute one isolated
+real-harness E2E job for each pinned CLI.
 
 ## License
 

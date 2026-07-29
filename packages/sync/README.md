@@ -40,6 +40,24 @@ import { CliEvent } from "@lumen-build/sync/contracts"
 
 OpenCode can load the usage-only plugin from `@lumen-build/sync/opencode`. It remains inactive until `LUMEN_COLLECTOR_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly set.
 
+## Harness verification
+
+The Linux E2E matrix invokes the packed CLI and pinned real binaries against a
+strict local model mock:
+
+| Harness     | Verified evidence                                                               |
+| ----------- | ------------------------------------------------------------------------------- |
+| Claude Code | Real model call, non-zero native live usage, and non-empty ccusage daily import |
+| Codex       | Real model call, non-zero native live usage, and non-empty ccusage daily import |
+| Gemini CLI  | Real model call and non-empty daily import; native live OTLP was not observed   |
+| OpenCode    | Real model call, packed-plugin live envelope, and non-empty daily import        |
+
+OpenCode's first real plugin event currently has zero token fields. GitHub
+Copilot CLI and VS Code Copilot have configuration and official-shaped
+telemetry coverage, but not a real-client E2E. These boundaries are intentional:
+the tests do not inject undocumented endpoints or wait indefinitely to turn an
+unobserved signal into a claim.
+
 For automation, pass `--json` to receive one versioned JSON event per line.
 The resource/verb commands include `config init|path|show`, `harness
 list|status|configure|remove`, `collector run|status`, `sync daily`, `auth
@@ -51,6 +69,18 @@ The CLI checkpoints live aggregate state after each successful upload under
 the platform state directory, so cumulative revisions survive
 collector restarts. Daily ccusage import remains the recovery source for events
 received after the latest checkpoint.
+
+## Live and daily source semantics
+
+Live OTLP and daily ccusage data are separate source products. `otel-live` is a
+low-latency, revisioned view; `ccusage-daily` is a later aggregate read from the
+agent's local usage records. They can describe the same inference, so a receiver
+must not add them together by default.
+
+Every envelope carries its source. The reconciliation API requires one explicit
+policy: `separate`, `otel-only`, `ccusage-only`, or
+`ccusage-baseline-live-delta`. `separate` is the safe default when provider or
+model identity cannot be matched unambiguously.
 
 ## Receiver contract
 

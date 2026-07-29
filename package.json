@@ -15,7 +15,8 @@
     "lint": "oxlint .",
     "package:check": "bun run build && bun ./scripts/package-smoke.mjs",
     "test": "vitest run && bun test .bun.test.ts",
-    "test:e2e": "bun run test:e2e:product",
+    "test:e2e": "bun run test:e2e:product && bun run test:e2e:harness",
+    "test:e2e:harness": "bun run build && bun test packages/sync/e2e/harness.e2e.test.ts",
     "test:e2e:product": "bun run build && bun test packages/sync/e2e/product.e2e.test.ts",
     "test:watch": "vitest",
     "typecheck": "turbo run typecheck"

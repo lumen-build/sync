@@ -1,0 +1,13 @@
+{
+  "name": "@lumen-build/sync-harness-e2e-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.220",
+    "@copilotkit/aimock": "1.37.4",
+    "@google/gemini-cli": "0.53.0",
+    "@openai/codex": "0.146.0",
+    "node": "22.23.1",
+    "opencode-ai": "1.18.9"
+  }
+}
