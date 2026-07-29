@@ -2,18 +2,22 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { Effect } from "effect"
+import * as BunServices from "@effect/platform-bun/BunServices"
+import { Effect, FileSystem } from "effect"
 import { it } from "@effect/vitest"
 import { expect } from "vitest"
 
 import {
+  ConfigurationInitError,
   InvalidConfiguration,
   MissingConfiguration,
   decode,
   decodeWithEnvironment,
+  initialize,
   load,
   requireCollector,
   resolveConfigPath,
+  resolveRuntimePaths,
 } from "./index.js"
 
 it.effect("decodes explicit endpoint and OIDC settings without secret material", () =>
@@ -32,7 +36,6 @@ it.effect("decodes explicit endpoint and OIDC settings without secret material",
       },
       collector: { listen_url: "http://127.0.0.1:4318" },
       destination: { base_url: "https://usage.lumen.build" },
-      privacy: { mode: "usage-only" },
     })
 
     expect(config).toEqual({
@@ -49,7 +52,6 @@ it.effect("decodes explicit endpoint and OIDC settings without secret material",
       },
       collector: { listenUrl: "http://127.0.0.1:4318" },
       destination: { baseUrl: "https://usage.lumen.build" },
-      privacy: { mode: "usage-only" },
     })
   }),
 )
@@ -110,7 +112,7 @@ it.effect("rejects collector listen URLs with unsupported TOML URL components", 
         }
       }),
     (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(BunServices.layer)),
 )
 
 it.effect("rejects collector environment overrides with unsupported URL components", () =>
@@ -140,6 +142,17 @@ it.effect("fails only when a command requires an absent endpoint", () =>
     const config = yield* decode({})
     const failure = yield* Effect.flip(requireCollector(config))
     expect(failure).toBeInstanceOf(MissingConfiguration)
+  }),
+)
+
+it.effect("rejects removed privacy and model catalog settings", () =>
+  Effect.gen(function* () {
+    expect(yield* Effect.flip(decode({ privacy: { mode: "usage-only" } }))).toBeInstanceOf(
+      InvalidConfiguration,
+    )
+    expect(
+      yield* Effect.flip(decode({ model_catalog: { url: "https://usage.lumen.build" } })),
+    ).toBeInstanceOf(InvalidConfiguration)
   }),
 )
 
@@ -184,7 +197,7 @@ it("uses XDG on Unix and APPDATA on Windows", () => {
       homeDirectory: "/home/dev",
       platform: "linux",
     }),
-  ).toBe("/tmp/config/lumen/config.toml")
+  ).toBe("/tmp/config/lumen-build/sync/config.toml")
 
   expect(
     resolveConfigPath({
@@ -192,7 +205,46 @@ it("uses XDG on Unix and APPDATA on Windows", () => {
       homeDirectory: "C:\\Users\\dev",
       platform: "win32",
     }),
-  ).toBe("C:\\Users\\dev\\AppData\\Roaming\\lumen\\config.toml")
+  ).toBe("C:\\Users\\dev\\AppData\\Roaming\\lumen-build\\sync\\config.toml")
+})
+
+it("separates default state and data while isolating explicit configuration", () => {
+  expect(
+    resolveRuntimePaths({
+      host: {
+        configHome: "/home/dev/.config",
+        dataHome: "/home/dev/.local/share",
+        homeDirectory: "/home/dev",
+        platform: "linux",
+        stateHome: "/home/dev/.local/state",
+      },
+    }),
+  ).toEqual({
+    collectorStateFile: "/home/dev/.local/state/lumen-build/sync/collector.json",
+    configDirectory: "/home/dev/.config/lumen-build/sync",
+    configFile: "/home/dev/.config/lumen-build/sync/config.toml",
+    credentialsFile: "/home/dev/.local/share/lumen-build/sync/credentials.json",
+    dailySyncDirectory: "/home/dev/.local/state/lumen-build/sync/daily-sync",
+    deviceIdFile: "/home/dev/.local/share/lumen-build/sync/device-id",
+    serviceStateDirectory: "/home/dev/.local/state/lumen-build/sync/service",
+    stateDirectory: "/home/dev/.local/state/lumen-build/sync",
+  })
+
+  expect(
+    resolveRuntimePaths({
+      configPath: "/tmp/lumen/config.toml",
+      host: { homeDirectory: "/home/dev", platform: "linux" },
+    }),
+  ).toEqual({
+    collectorStateFile: "/tmp/lumen/state/collector.json",
+    configDirectory: "/tmp/lumen",
+    configFile: "/tmp/lumen/config.toml",
+    credentialsFile: "/tmp/lumen/credentials.json",
+    dailySyncDirectory: "/tmp/lumen/state/daily-sync",
+    deviceIdFile: "/tmp/lumen/device-id",
+    serviceStateDirectory: "/tmp/lumen/state/service",
+    stateDirectory: "/tmp/lumen/state",
+  })
 })
 
 it.effect("loads TOML while letting the environment override it", () =>
@@ -202,17 +254,7 @@ it.effect("loads TOML while letting the environment override it", () =>
       Effect.gen(function* () {
         const path = join(directory, "config.toml")
         yield* Effect.promise(() =>
-          writeFile(
-            path,
-            [
-              "[destination]",
-              'base_url = "https://old.lumen.build"',
-              "",
-              "[privacy]",
-              'mode = "usage-only"',
-              "",
-            ].join("\n"),
-          ),
+          writeFile(path, ["[destination]", 'base_url = "https://old.lumen.build"', ""].join("\n")),
         )
         const configuration = yield* load({
           environment: {
@@ -223,5 +265,57 @@ it.effect("loads TOML while letting the environment override it", () =>
         expect(configuration.destination?.baseUrl).toBe("https://usage.lumen.build")
       }),
     (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(BunServices.layer)),
+)
+
+it.effect("initializes explicit usage-only configuration without persisting bearer secrets", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-sync-config-"))),
+    (directory) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const path = join(directory, "config.toml")
+        const created = yield* initialize({
+          auth: { mode: "bearer" },
+          collectorListenUrl: "http://127.0.0.1:4318",
+          destinationBaseUrl: "https://usage.lumen.build",
+          path,
+        })
+        expect(created.path).toBe(path)
+
+        const configuration = yield* load({
+          environment: { LUMEN_BEARER_TOKEN: "must-not-be-persisted" },
+          path,
+        })
+        expect(configuration).toEqual({
+          auth: { mode: "bearer" },
+          collector: { listenUrl: "http://127.0.0.1:4318" },
+          destination: { baseUrl: "https://usage.lumen.build" },
+        })
+        const contents = yield* fs.readFileString(path)
+        expect(contents).not.toContain("must-not-be-persisted")
+
+        const failure = yield* Effect.flip(
+          initialize({
+            collectorListenUrl: "http://127.0.0.1:4318",
+            path,
+          }),
+        )
+        expect(failure).toBeInstanceOf(ConfigurationInitError)
+      }),
+    (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
+  ).pipe(Effect.provide(BunServices.layer)),
+)
+
+it.effect("rejects a destination without matching authentication during init", () =>
+  Effect.gen(function* () {
+    const failure = yield* Effect.flip(
+      initialize({
+        collectorListenUrl: "http://127.0.0.1:4318",
+        destinationBaseUrl: "https://usage.lumen.build",
+        path: "/tmp/unused-config.toml",
+      }),
+    )
+    expect(failure).toBeInstanceOf(InvalidConfiguration)
+  }).pipe(Effect.provide(BunServices.layer)),
 )
