@@ -1,4 +1,4 @@
-import { CcusageCommand, CcusageImporter, importerLayer } from "@lumen-build/sync-ccusage"
+import { CcusageCommand, importerLayer } from "@lumen-build/sync-ccusage"
 import { Destination } from "@lumen-build/sync-destination"
 import { expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"

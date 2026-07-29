@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.4
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run check
+
+      - run: bun run build
+
+      - run: bun packages/sync/dist/cli.js --help
+
+  package:
+    name: Packed npm artifact
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.4
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run package:check

@@ -1,7 +1,16 @@
 import { Schema } from "effect"
 import { describe, expect, it } from "vitest"
 
-import { CcusageDailyBatch, OtelLiveBatch, UsagePrincipal, UsageSnapshot } from "./index.js"
+import {
+  CcusageDailyBatch,
+  OtelLiveBatch,
+  UsagePrincipal,
+  UsageSnapshot,
+  addUsageTokens,
+  defaultProviderForAgent,
+  emptyUsageTokens,
+  usageSnapshotKey,
+} from "./index.js"
 
 const snapshot = {
   agent: "codex",
@@ -16,7 +25,7 @@ const snapshot = {
     reasoningOutput: 10,
     tool: 0,
   },
-}
+} satisfies typeof UsageSnapshot.Type
 
 describe("public usage contracts", () => {
   it("accepts distinct live and daily source envelopes", () => {
@@ -58,5 +67,11 @@ describe("public usage contracts", () => {
         claims: {},
       }),
     ).toBe(false)
+  })
+
+  it("owns token algebra and snapshot identity semantics", () => {
+    expect(addUsageTokens(emptyUsageTokens(), snapshot.tokens)).toEqual(snapshot.tokens)
+    expect(usageSnapshotKey(snapshot)).toBe("2026-07-29\u0000codex\u0000openai\u0000gpt-5.6")
+    expect(defaultProviderForAgent("vscode")).toBe("github")
   })
 })

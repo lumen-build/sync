@@ -1,5 +1,5 @@
 import type { OidcConfiguration } from "@lumen-build/sync-config"
-import { Context, Effect, Layer, Redacted, Schema } from "effect"
+import { Context, Effect, Layer, Redacted, Ref, Schema, Semaphore } from "effect"
 
 import { AuthenticationFailed } from "./errors.js"
 import { OidcClient } from "./ports.js"
@@ -143,6 +143,9 @@ const requestToken = Effect.fn("OidcClient.requestToken")(function* (
   )
   return {
     accessToken: Redacted.make(token.access_token),
+    ...(token.expires_in === undefined
+      ? {}
+      : { expiresAt: Date.now() + Math.max(0, token.expires_in) * 1_000 }),
     ...(token.refresh_token === undefined
       ? {}
       : { refreshToken: Redacted.make(token.refresh_token) }),
@@ -153,9 +156,23 @@ export const liveOidcClientLayer = Layer.effect(
   OidcClient,
   Effect.gen(function* () {
     const receiver = yield* AuthorizationCodeReceiver
+    const discoveryCache = yield* Ref.make(new Map<string, DiscoveryDocument>())
+    const discoveryLock = yield* Semaphore.make(1)
+    const cachedDiscovery = Effect.fn("OidcClient.cachedDiscovery")((issuer: string) =>
+      discoveryLock.withPermit(
+        Effect.gen(function* () {
+          const key = issuer.replace(/\/$/u, "")
+          const cached = (yield* Ref.get(discoveryCache)).get(key)
+          if (cached !== undefined) return cached
+          const document = yield* discover(issuer)
+          yield* Ref.update(discoveryCache, (current) => new Map(current).set(key, document))
+          return document
+        }),
+      ),
+    )
 
     const authorize = Effect.fn("OidcClient.authorize")(function* (config: OidcConfiguration) {
-      const discovery = yield* discover(config.issuer)
+      const discovery = yield* cachedDiscovery(config.issuer)
       const verifier = yield* randomValue()
       const challenge = yield* codeChallenge(verifier)
       const state = yield* randomValue()
@@ -203,7 +220,7 @@ export const liveOidcClientLayer = Layer.effect(
       config: OidcConfiguration,
       assertion: Redacted.Redacted<string>,
     ) {
-      const discovery = yield* discover(config.issuer)
+      const discovery = yield* cachedDiscovery(config.issuer)
       const body = new URLSearchParams({
         assertion: Redacted.value(assertion),
         client_id: config.clientId,
@@ -218,7 +235,7 @@ export const liveOidcClientLayer = Layer.effect(
       config: OidcConfiguration,
       refreshToken: Redacted.Redacted<string>,
     ) {
-      const discovery = yield* discover(config.issuer)
+      const discovery = yield* cachedDiscovery(config.issuer)
       const body = new URLSearchParams({
         client_id: config.clientId,
         grant_type: "refresh_token",
@@ -231,7 +248,7 @@ export const liveOidcClientLayer = Layer.effect(
       config: OidcConfiguration,
       token: Redacted.Redacted<string>,
     ) {
-      const discovery = yield* discover(config.issuer)
+      const discovery = yield* cachedDiscovery(config.issuer)
       if (discovery.revocation_endpoint === undefined) return
       yield* requestVoid("OidcClient.revoke", discovery.revocation_endpoint, {
         body: new URLSearchParams({

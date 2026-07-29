@@ -2,12 +2,14 @@ import type {
   CcusageDailyBatch,
   UsageCostSnapshot,
   UsageSnapshot,
-  UsageTokens,
 } from "@lumen-build/sync-contracts"
 import {
   CcusageDailyBatch as CcusageDailyBatchSchema,
   NonNegativeSafeInteger,
   UsageDay,
+  addUsageTokens,
+  defaultProviderForAgent,
+  usageSnapshotKey,
 } from "@lumen-build/sync-contracts"
 import { Context, Effect, Layer, Schema } from "effect"
 
@@ -153,48 +155,12 @@ export class CcusageCommand extends Context.Service<CcusageCommand, CcusageComma
   "@lumen-build/sync/CcusageCommand",
 ) {}
 
-const providerFor = (agent: CcusageAgent): string => {
-  switch (agent) {
-    case "claude":
-      return "anthropic"
-    case "codex":
-      return "openai"
-    case "copilot":
-      return "github"
-    case "gemini":
-      return "google"
-    case "opencode":
-      return "unknown"
-  }
-}
-
-const zeroTokens = (): UsageTokens => ({
-  cacheCreationInput: 0,
-  cacheReadInput: 0,
-  input: 0,
-  output: 0,
-  reasoningOutput: 0,
-  tool: 0,
-})
-
-const addTokens = (left: UsageTokens, right: UsageTokens): UsageTokens => ({
-  cacheCreationInput: left.cacheCreationInput + right.cacheCreationInput,
-  cacheReadInput: left.cacheReadInput + right.cacheReadInput,
-  input: left.input + right.input,
-  output: left.output + right.output,
-  reasoningOutput: left.reasoningOutput + right.reasoningOutput,
-  tool: left.tool + right.tool,
-})
-
-const snapshotKey = (snapshot: UsageSnapshot): string =>
-  [snapshot.day, snapshot.agent, snapshot.provider, snapshot.model].join("\u0000")
-
 const aggregateSnapshots = (
   snapshots: ReadonlyArray<UsageSnapshot>,
 ): ReadonlyArray<UsageSnapshot> => {
   const byIdentity = new Map<string, UsageSnapshot>()
   for (const snapshot of snapshots) {
-    const key = snapshotKey(snapshot)
+    const key = usageSnapshotKey(snapshot)
     const existing = byIdentity.get(key)
     byIdentity.set(
       key,
@@ -202,12 +168,12 @@ const aggregateSnapshots = (
         ? snapshot
         : {
             ...existing,
-            tokens: addTokens(existing.tokens, snapshot.tokens),
+            tokens: addUsageTokens(existing.tokens, snapshot.tokens),
           },
     )
   }
   return [...byIdentity.values()].toSorted((left, right) =>
-    snapshotKey(left).localeCompare(snapshotKey(right)),
+    usageSnapshotKey(left).localeCompare(usageSnapshotKey(right)),
   )
 }
 
@@ -253,7 +219,7 @@ const commonSnapshots = (
         agent,
         day: row.date,
         model: model.modelName,
-        provider: providerFor(agent),
+        provider: defaultProviderForAgent(agent),
         tokens: {
           cacheCreationInput: model.cacheCreationTokens,
           cacheReadInput: model.cacheReadTokens,
@@ -417,5 +383,3 @@ export const makeCommand = ({
 
 export const commandLayer = (options?: CommandOptions) =>
   Layer.effect(CcusageCommand, makeCommand(options))
-
-export const emptyUsageTokens = zeroTokens

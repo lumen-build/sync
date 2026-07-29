@@ -20,13 +20,35 @@ interface PendingModel {
 
 export interface OpenCodeUsageState {
   readonly emitted: Set<string>
+  readonly limit: number
   readonly pendingModels: Map<string, PendingModel>
 }
 
-export const makeOpenCodeUsageState = (): OpenCodeUsageState => ({
+export const makeOpenCodeUsageState = (limit = 10_000): OpenCodeUsageState => ({
   emitted: new Set(),
+  limit: Math.max(1, Math.trunc(limit)),
   pendingModels: new Map(),
 })
+
+const removeOldest = <Value>(values: Set<string> | Map<string, Value>): void => {
+  const oldest = values.keys().next().value
+  if (oldest !== undefined) values.delete(oldest)
+}
+
+const remember = (values: Set<string>, value: string, limit: number): void => {
+  if (values.size >= limit) removeOldest(values)
+  values.add(value)
+}
+
+const rememberModel = (
+  values: Map<string, PendingModel>,
+  id: string,
+  model: PendingModel,
+  limit: number,
+): void => {
+  if (!values.has(id) && values.size >= limit) removeOldest(values)
+  values.set(id, model)
+}
 
 const object = (value: unknown): JsonObject | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -79,10 +101,15 @@ const stepStarted = (
   const id = text(properties.assistantMessageID)
   const model = object(properties.model)
   if (id !== undefined && model !== undefined) {
-    state.pendingModels.set(id, {
-      model: text(model.modelID) ?? text(model.id) ?? "unknown",
-      provider: text(model.providerID) ?? "unknown",
-    })
+    rememberModel(
+      state.pendingModels,
+      id,
+      {
+        model: text(model.modelID) ?? text(model.id) ?? "unknown",
+        provider: text(model.providerID) ?? "unknown",
+      },
+      state.limit,
+    )
   }
   return []
 }
@@ -137,8 +164,9 @@ export const usageFromOpenCodeEvent = (
   }
 
   return candidates.filter((usage) => {
+    state.pendingModels.delete(usage.id)
     if (state.emitted.has(usage.id)) return false
-    state.emitted.add(usage.id)
+    remember(state.emitted, usage.id, state.limit)
     return true
   })
 }

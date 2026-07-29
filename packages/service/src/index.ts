@@ -72,7 +72,7 @@ const validatePath = (
   field: string,
   value: string,
 ): Effect.Effect<string, InvalidServiceDefinition> =>
-  value.length === 0 || /[\u0000\r\n]/u.test(value)
+  value.length === 0 || value.includes("\u0000") || /[\r\n]/u.test(value)
     ? Effect.fail(
         new InvalidServiceDefinition({
           field,
@@ -195,7 +195,7 @@ const systemdDefinition = (
     stderr: "journalctl --user --unit lumen-sync.service",
     stdout: "journalctl --user --unit lumen-sync.service",
   }
-  const arguments_ = [executablePath, "collector", "start", "--config", configPath]
+  const commandArguments = [executablePath, "collector", "start", "--config", configPath]
     .map(systemdArgument)
     .join(" ")
   const contents = [
@@ -204,7 +204,7 @@ const systemdDefinition = (
     "After=network-online.target",
     "",
     "[Service]",
-    `ExecStart=${arguments_}`,
+    `ExecStart=${commandArguments}`,
     "Restart=on-failure",
     "RestartSec=2",
     "",
@@ -239,16 +239,18 @@ const windowsDefinition = (
     stderr: win32.join(root, "collector.stderr.log"),
     stdout: win32.join(root, "collector.stdout.log"),
   }
-  const arguments_ = ["collector", "start", "--config", configPath].map(windowsArgument).join(" ")
+  const commandArguments = ["collector", "start", "--config", configPath]
+    .map(windowsArgument)
+    .join(" ")
   const contents = [
-    '<?xml version="1.0" encoding="UTF-16"?>',
+    '<?xml version="1.0" encoding="UTF-8"?>',
     '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
     "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
     '  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>',
     "  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><RestartOnFailure><Interval>PT2S</Interval><Count>3</Count></RestartOnFailure></Settings>",
     '  <Actions Context="Author"><Exec>',
     `    <Command>${xml(executablePath)}</Command>`,
-    `    <Arguments>${xml(arguments_)}</Arguments>`,
+    `    <Arguments>${xml(commandArguments)}</Arguments>`,
     "  </Exec></Actions>",
     "</Task>",
     "",
@@ -373,11 +375,13 @@ export const installService = Effect.fn("ServiceLifecycle.install")(function* (
 export const uninstallService = Effect.fn("ServiceLifecycle.uninstall")(function* (
   definition: ServiceDefinition,
 ) {
-  yield* runCommands(definition.uninstall)
+  const [stop, ...afterRemoval] = definition.uninstall
+  if (stop !== undefined) yield* runCommands([stop])
   yield* Effect.tryPromise({
     try: () => rm(definition.artifact.path, { force: true }),
     catch: (cause) => lifecycleError("remove service definition", cause),
   })
+  yield* runCommands(afterRemoval)
 })
 
 export const liveServiceCommandRunnerLayer: Layer.Layer<ServiceCommandRunner> = Layer.succeed(

@@ -60,6 +60,24 @@ export const UsageTokens = Schema.Struct({
 
 export interface UsageTokens extends Schema.Schema.Type<typeof UsageTokens> {}
 
+export const emptyUsageTokens = (): UsageTokens => ({
+  cacheCreationInput: 0,
+  cacheReadInput: 0,
+  input: 0,
+  output: 0,
+  reasoningOutput: 0,
+  tool: 0,
+})
+
+export const addUsageTokens = (left: UsageTokens, right: UsageTokens): UsageTokens => ({
+  cacheCreationInput: left.cacheCreationInput + right.cacheCreationInput,
+  cacheReadInput: left.cacheReadInput + right.cacheReadInput,
+  input: left.input + right.input,
+  output: left.output + right.output,
+  reasoningOutput: left.reasoningOutput + right.reasoningOutput,
+  tool: left.tool + right.tool,
+})
+
 export const UsageSnapshot = Schema.Struct({
   agent: UsageAgent,
   day: UsageDay,
@@ -69,6 +87,26 @@ export const UsageSnapshot = Schema.Struct({
 }).annotate({ identifier: "UsageSnapshot" })
 
 export interface UsageSnapshot extends Schema.Schema.Type<typeof UsageSnapshot> {}
+
+export const usageSnapshotKey = (snapshot: UsageSnapshot): string =>
+  [snapshot.day, snapshot.agent, snapshot.provider, snapshot.model].join("\u0000")
+
+export const defaultProviderForAgent = (agent: UsageSnapshot["agent"]): string => {
+  switch (agent) {
+    case "claude":
+      return "anthropic"
+    case "codex":
+      return "openai"
+    case "copilot":
+    case "vscode":
+      return "github"
+    case "gemini":
+      return "google"
+    case "opencode":
+    case "unknown":
+      return "unknown"
+  }
+}
 
 export const UsageCostCoverage = Schema.Literals(["complete", "partial", "source-reported"])
 

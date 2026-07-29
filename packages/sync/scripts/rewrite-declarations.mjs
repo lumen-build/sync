@@ -31,15 +31,18 @@ const files = async (directory) => {
   ).flat()
 }
 
-for (const path of await files(declarationsRoot)) {
-  if (!path.endsWith(".d.ts")) continue
-  let contents = await readFile(path, "utf8")
-  for (const [specifier, target] of targets) {
-    let replacement = relative(dirname(path), resolve(declarationsRoot, target))
-      .split(sep)
-      .join("/")
-    if (!replacement.startsWith(".")) replacement = `./${replacement}`
-    contents = contents.replaceAll(`"${specifier}"`, `"${replacement}"`)
-  }
-  await writeFile(path, contents)
-}
+await Promise.all(
+  (await files(declarationsRoot))
+    .filter((path) => path.endsWith(".d.ts"))
+    .map(async (path) => {
+      let contents = await readFile(path, "utf8")
+      for (const [specifier, target] of targets) {
+        let replacement = relative(dirname(path), resolve(declarationsRoot, target))
+          .split(sep)
+          .join("/")
+        if (!replacement.startsWith(".")) replacement = `./${replacement}`
+        contents = contents.replaceAll(`"${specifier}"`, `"${replacement}"`)
+      }
+      await writeFile(path, contents)
+    }),
+)

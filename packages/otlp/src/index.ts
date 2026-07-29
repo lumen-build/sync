@@ -162,7 +162,7 @@ const durationMillis = (start: unknown, end: unknown): number | undefined => {
 
 const bytesToHex = (value: unknown): string | undefined => {
   if (!(value instanceof Uint8Array) || value.byteLength === 0) return undefined
-  return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("")
+  return Buffer.from(value).toString("hex")
 }
 
 const anyValueToNative = (input: unknown): OtlpValue => {
@@ -261,23 +261,32 @@ const mapLogs = (wire: WireRecord): DecodedTelemetry => ({
   }),
 })
 
-const temporality = (value: unknown): MetricTemporality =>
-  numberFromUnknown(value) === 1
-    ? "delta"
-    : numberFromUnknown(value) === 2
-      ? "cumulative"
-      : "unspecified"
+const temporality = (value: unknown): MetricTemporality => {
+  switch (numberFromUnknown(value)) {
+    case 1:
+      return "delta"
+    case 2:
+      return "cumulative"
+    default:
+      return "unspecified"
+  }
+}
 
 const mapPoint = (input: unknown): OtlpMetricPoint => {
   const point = asRecord(input)
   const startTimestamp = nanosToIsoTimestamp(point.startTimeUnixNano)
   const timestamp = nanosToIsoTimestamp(point.timeUnixNano)
-  const value =
-    point.value === "asDouble"
-      ? numberFromUnknown(point.asDouble)
-      : point.value === "asInt"
-        ? numberFromUnknown(point.asInt)
-        : numberFromUnknown(point.sum)
+  let value: number | undefined
+  switch (point.value) {
+    case "asDouble":
+      value = numberFromUnknown(point.asDouble)
+      break
+    case "asInt":
+      value = numberFromUnknown(point.asInt)
+      break
+    default:
+      value = numberFromUnknown(point.sum)
+  }
   return {
     attributes: keyValuesToRecord(point.attributes),
     ...(startTimestamp === undefined ? {} : { startTimestamp }),

@@ -5,6 +5,7 @@ import type { AuthenticationFailed, MissingCredential, SecretStoreError } from "
 
 export interface TokenSet {
   readonly accessToken: Redacted.Redacted<string>
+  readonly expiresAt?: number
   readonly refreshToken?: Redacted.Redacted<string>
 }
 

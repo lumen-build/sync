@@ -73,3 +73,37 @@ it("correlates the current step-started and step-ended events", () => {
 it("does not install a network hook unless an endpoint is explicit", async () => {
   await expect(LumenSync({ environment: {} })).resolves.toEqual({})
 })
+
+it("bounds incomplete and completed OpenCode event state", () => {
+  const state = makeOpenCodeUsageState(2)
+  for (const id of ["one", "two", "three"]) {
+    usageFromOpenCodeEvent(
+      {
+        properties: {
+          assistantMessageID: id,
+          model: { modelID: "mocked", providerID: "mocked" },
+        },
+        type: "session.next.step.started",
+      },
+      state,
+    )
+  }
+  expect([...state.pendingModels.keys()]).toEqual(["two", "three"])
+
+  for (const id of ["one", "two", "three"]) {
+    usageFromOpenCodeEvent(
+      {
+        properties: {
+          info: {
+            id,
+            role: "assistant",
+            tokens: { input: 1, output: 1 },
+          },
+        },
+        type: "message.updated",
+      },
+      state,
+    )
+  }
+  expect([...state.emitted]).toEqual(["two", "three"])
+})

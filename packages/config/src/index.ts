@@ -3,13 +3,7 @@ import { readFile } from "node:fs/promises"
 import { TomlDocument } from "@decimalturn/toml-patch"
 import { Effect, Schema } from "effect"
 
-const parseUrl = (value: string): URL | undefined => {
-  try {
-    return new URL(value)
-  } catch {
-    return undefined
-  }
-}
+const parseUrl = (value: string): URL | undefined => URL.parse(value) ?? undefined
 
 const loopbackHosts = new Set(["127.0.0.1", "::1", "[::1]", "localhost"])
 

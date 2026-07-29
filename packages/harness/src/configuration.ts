@@ -1,3 +1,5 @@
+/* oxlint-disable no-underscore-dangle -- Effect-style tagged values use _tag. */
+
 import { stringify, TomlDocument, TomlFormat } from "@decimalturn/toml-patch"
 import { Effect, Option, Predicate, Schema } from "effect"
 import { applyEdits, modify, parse } from "jsonc-parser"
@@ -11,9 +13,12 @@ import {
   type ManagedChange,
   type ManagedValue,
   type PreparedConfiguration,
+  managedPathKey,
+  managedValuesEqual,
 } from "./model"
 
 interface ManagedSetting {
+  readonly operation?: "ensure-array-member"
   readonly path: ReadonlyArray<string>
   readonly value: ManagedValue
 }
@@ -45,12 +50,12 @@ export interface PreparedRemoval {
 
 const present = (value: Schema.Json): ManagedValue => ({ _tag: "Present", value })
 const absent: ManagedValue = { _tag: "Absent" }
-const jsonEqual = Schema.toEquivalence(Schema.Json)
 const isPresent = (
   value: ManagedValue,
 ): value is Extract<ManagedValue, { readonly _tag: "Present" }> => value._tag === "Present"
 
 const baseUrl = (collectorUrl: string): string => collectorUrl.replace(/\/+$/u, "")
+const openCodePlugin = "@lumen-build/sync/opencode"
 const endpoint = (collectorUrl: string, signal: "logs" | "metrics" | "traces"): string =>
   `${baseUrl(collectorUrl)}/v1/${signal}`
 
@@ -115,7 +120,13 @@ export const specifications = (
         { path: ["telemetry", "outfile"], value: absent },
       ]
     case "opencode":
-      return [{ path: ["plugin"], value: present(["@lumen-build/sync/opencode"]) }]
+      return [
+        {
+          operation: "ensure-array-member",
+          path: ["plugin"],
+          value: present([openCodePlugin]),
+        },
+      ]
     case "vscode":
       return [
         { path: ["github.copilot.chat.otel.enabled"], value: present(true) },
@@ -145,10 +156,31 @@ const readPath = (root: unknown, path: ReadonlyArray<string>): ObservedValue => 
     : { supported: false }
 }
 
-const valuesEqual = (left: ManagedValue, right: ManagedValue): boolean => {
-  if (left._tag === "Absent" || right._tag === "Absent") return left._tag === right._tag
-  return jsonEqual(left.value, right.value)
-}
+const settingsFor = (
+  harness: Harness,
+  collectorUrl: string,
+  root: unknown,
+): ReadonlyArray<ManagedSetting> =>
+  specifications(harness, collectorUrl).map((setting) => {
+    if (setting.operation !== "ensure-array-member") return setting
+    const observed = readPath(root, setting.path)
+    if (
+      !observed.supported ||
+      observed.value._tag !== "Present" ||
+      !Array.isArray(observed.value.value) ||
+      !observed.value.value.every((value) => typeof value === "string") ||
+      setting.value._tag !== "Present" ||
+      !Array.isArray(setting.value.value)
+    ) {
+      return setting
+    }
+    const current = observed.value.value as ReadonlyArray<string>
+    const members = setting.value.value as ReadonlyArray<string>
+    return {
+      ...setting,
+      value: present([...new Set([...current, ...members])]),
+    }
+  })
 
 const setPath = (
   root: unknown,
@@ -175,6 +207,27 @@ const stateFor = (
   if (conflicts.length > 0) return "conflicting"
   if (changes.length === 0) return "exact"
   return changes.length === total ? "missing" : "partial"
+}
+
+const isAdditiveChange = (setting: ManagedSetting, change: ManagedChange): boolean => {
+  if (
+    setting.operation !== "ensure-array-member" ||
+    !isPresent(change.before) ||
+    !isPresent(change.after) ||
+    !Array.isArray(change.before.value) ||
+    !Array.isArray(change.after.value)
+  ) {
+    return false
+  }
+
+  const before = change.before.value
+  const after = change.after.value
+  return (
+    before.every((member) => after.includes(member)) &&
+    isPresent(setting.value) &&
+    Array.isArray(setting.value.value) &&
+    setting.value.value.every((member) => after.includes(member))
+  )
 }
 
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
@@ -258,15 +311,35 @@ const renderJson = (source: string, changes: ReadonlyArray<ManagedChange>): stri
 const isSemanticallyEmpty = (value: unknown): boolean =>
   Predicate.isObject(value) && Object.values(value).every(isSemanticallyEmpty)
 
+const acceptsMergedValue = (setting: ManagedSetting, value: ManagedValue): boolean => {
+  if (
+    setting.operation !== "ensure-array-member" ||
+    !isPresent(setting.value) ||
+    !Array.isArray(setting.value.value) ||
+    !isPresent(value) ||
+    !Array.isArray(value.value)
+  ) {
+    return false
+  }
+  const expected = setting.value.value
+  const actual = value.value
+  return expected.every((member) => actual.includes(member))
+}
+
 const invalidOwnershipField = (
   settings: ReadonlyArray<ManagedSetting>,
   changes: ReadonlyArray<ManagedChange>,
 ): string | undefined => {
   const seen = new Set<string>()
   for (const change of changes) {
-    const key = change.path.join(".")
-    const setting = settings.find((candidate) => candidate.path.join(".") === key)
-    if (setting === undefined || seen.has(key) || !valuesEqual(change.after, setting.value))
+    const key = managedPathKey(change.path)
+    const setting = settings.find((candidate) => managedPathKey(candidate.path) === key)
+    const validMergedSetting = setting !== undefined && acceptsMergedValue(setting, change.after)
+    if (
+      setting === undefined ||
+      seen.has(key) ||
+      (!validMergedSetting && !managedValuesEqual(change.after, setting.value))
+    )
       return key
     seen.add(key)
   }
@@ -282,7 +355,7 @@ export const prepareConfiguration = Effect.fn("HarnessConfiguration.prepare")(fu
   const document =
     harness === "codex" ? yield* parseToml(harness, contents) : yield* parseJson(harness, contents)
   const root: unknown = document instanceof TomlDocument ? document.toJsObject : document.root
-  const settings = specifications(harness, collectorUrl)
+  const settings = settingsFor(harness, collectorUrl, root)
   const observed = settings.map((setting) => ({ setting, value: readPath(root, setting.path) }))
   const unsupported = observed.find((item) => !item.value.supported)
   if (unsupported !== undefined) {
@@ -292,11 +365,19 @@ export const prepareConfiguration = Effect.fn("HarnessConfiguration.prepare")(fu
     })
   }
   const differences = observed.flatMap(({ setting, value }) =>
-    value.supported && !valuesEqual(value.value, setting.value)
+    value.supported && !managedValuesEqual(value.value, setting.value)
       ? [{ after: setting.value, before: value.value, path: setting.path }]
       : [],
   )
-  const conflicts = differences.filter((change) => change.before._tag === "Present")
+  const settingFor = (change: ManagedChange): ManagedSetting | undefined =>
+    settings.find((setting) => managedPathKey(setting.path) === managedPathKey(change.path))
+  const conflicts = differences.filter((change) => {
+    const setting = settingFor(change)
+    return (
+      change.before._tag === "Present" &&
+      (setting === undefined || !isAdditiveChange(setting, change))
+    )
+  })
   const state = stateFor(differences, conflicts, settings.length)
   if (conflicts.length > 0 && !force) {
     return yield* new HarnessConfigurationConflict({
@@ -306,7 +387,11 @@ export const prepareConfiguration = Effect.fn("HarnessConfiguration.prepare")(fu
   }
   const changes = force
     ? differences
-    : differences.filter((change) => change.before._tag === "Absent")
+    : differences.filter(
+        (change) =>
+          change.before._tag === "Absent" ||
+          (settingFor(change) !== undefined && isAdditiveChange(settingFor(change)!, change)),
+      )
   if (changes.length === 0) return { changes, contents, state } satisfies PreparedConfiguration
 
   if (document instanceof TomlDocument) {
@@ -343,6 +428,9 @@ export const prepareRemoval = Effect.fn("HarnessConfiguration.prepareRemoval")(f
   contents,
   harness,
 }: RemoveOptions) {
+  const document =
+    harness === "codex" ? yield* parseToml(harness, contents) : yield* parseJson(harness, contents)
+  const root: unknown = document instanceof TomlDocument ? document.toJsObject : document.root
   const settings = specifications(harness, collectorUrl)
   const invalidField = invalidOwnershipField(settings, changes)
   if (invalidField !== undefined) {
@@ -351,24 +439,44 @@ export const prepareRemoval = Effect.fn("HarnessConfiguration.prepareRemoval")(f
       reason: `ownership contains an invalid managed field: ${invalidField}`,
     })
   }
-  const document =
-    harness === "codex" ? yield* parseToml(harness, contents) : yield* parseJson(harness, contents)
-  const root: unknown = document instanceof TomlDocument ? document.toJsObject : document.root
-  const observed = changes.map((change) => ({ change, value: readPath(root, change.path) }))
-  const restorable = observed
-    .filter((item) => item.value.supported && valuesEqual(item.value.value, item.change.after))
-    .map((item) => item.change)
-  const preserved = observed
-    .filter((item) => !item.value.supported || !valuesEqual(item.value.value, item.change.after))
-    .map((item) => item.change.path.join("."))
-  const restored = restorable.map((change) => change.path.join("."))
-  const reverseChanges = restorable.map(
-    (change): ManagedChange => ({
-      after: change.before,
-      before: change.after,
-      path: change.path,
-    }),
-  )
+  const observed = changes.map((change) => ({
+    change,
+    setting: settings.find(
+      (setting) => managedPathKey(setting.path) === managedPathKey(change.path),
+    )!,
+    value: readPath(root, change.path),
+  }))
+  const reverseChanges = observed.flatMap(({ change, setting, value }) => {
+    if (!value.supported) return []
+    if (
+      setting.operation === "ensure-array-member" &&
+      isPresent(value.value) &&
+      Array.isArray(value.value.value) &&
+      isPresent(change.after) &&
+      Array.isArray(change.after.value)
+    ) {
+      const before =
+        isPresent(change.before) && Array.isArray(change.before.value) ? change.before.value : []
+      const inserted = change.after.value.filter((member) => !before.includes(member))
+      const next = value.value.value.filter((member) => !inserted.includes(member))
+      if (next.length === value.value.value.length) return []
+      return [
+        {
+          after: next.length === 0 && change.before._tag === "Absent" ? absent : present(next),
+          before: value.value,
+          path: change.path,
+        } satisfies ManagedChange,
+      ]
+    }
+    return managedValuesEqual(value.value, change.after)
+      ? [{ after: change.before, before: change.after, path: change.path }]
+      : []
+  })
+  const restoredKeys = new Set(reverseChanges.map((change) => managedPathKey(change.path)))
+  const preserved = changes
+    .filter((change) => !restoredKeys.has(managedPathKey(change.path)))
+    .map((change) => change.path.join("."))
+  const restored = reverseChanges.map((change) => change.path.join("."))
 
   if (document instanceof TomlDocument) {
     const updated = reverseChanges.reduce(

@@ -3,14 +3,13 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import {
   AssertionProvider,
   CredentialProvider,
   MissingCredential,
   SecretStore,
-  AuthorizationCodeReceiver,
   bearerCredentialLayer,
   environmentAssertionLayer,
   fileSecretStoreLayer,
@@ -33,12 +32,12 @@ import {
   type Configuration,
 } from "@lumen-build/sync-config"
 import { DeviceId } from "@lumen-build/sync-contracts"
-import { Destination, layer as destinationLayer } from "@lumen-build/sync-destination"
+import { layer as destinationLayer } from "@lumen-build/sync-destination"
 import {
   configureHarness,
+  Harness,
   makeHarnessPaths,
   removeHarness,
-  type Harness,
 } from "@lumen-build/sync-harness"
 import {
   installService,
@@ -50,7 +49,7 @@ import { BunHttpClient, BunRuntime, BunServices } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option, Redacted, Schema } from "effect"
 import { Command, Flag } from "effect/unstable/cli"
 
-import { parseCollectorAddress, runCollector, syncDaily } from "./runtime"
+import { parseCollectorAddress, runCollector, runLocalCollector, syncDaily } from "./runtime"
 
 const VERSION = "0.1.0"
 const environment = process.env as Readonly<Record<string, string | undefined>>
@@ -162,14 +161,27 @@ const loadDeviceId = Effect.fn("Cli.loadDeviceId")(function* (configPath: string
   if (existing !== undefined) return yield* Schema.decodeUnknownEffect(DeviceId)(existing)
 
   const created = crypto.randomUUID()
-  yield* Effect.tryPromise({
+  const persisted = yield* Effect.tryPromise({
     try: async () => {
       await mkdir(dirname(path), { mode: 0o700, recursive: true })
-      await writeFile(path, `${created}\n`, { flag: "wx", mode: 0o600 })
+      try {
+        await writeFile(path, `${created}\n`, { flag: "wx", mode: 0o600 })
+        return created
+      } catch (cause) {
+        if (
+          typeof cause === "object" &&
+          cause !== null &&
+          "code" in cause &&
+          cause.code === "EEXIST"
+        ) {
+          return (await readFile(path, "utf8")).trim()
+        }
+        throw cause
+      }
     },
     catch: (cause) => cause,
   })
-  return created
+  return yield* Schema.decodeUnknownEffect(DeviceId)(persisted)
 })
 
 const configPathCommand = Command.make("path", {}, () =>
@@ -192,7 +204,7 @@ const configCommand = Command.make("config").pipe(
   Command.withSubcommands([configPathCommand, configCheckCommand]),
 )
 
-const harnessChoice = ["claude", "codex", "copilot", "gemini", "opencode", "vscode"] as const
+const harnessChoice = Harness.literals
 const harnessFlags = {
   agent: Flag.choice("agent", harnessChoice).pipe(
     Flag.between(0, harnessChoice.length),
@@ -312,17 +324,7 @@ const collectorStartCommand = Command.make(
       const address = parseCollectorAddress(collector.listenUrl)
       const collectorServices = collectorLayer({ deviceId, maxBodyBytes: 10 * 1024 * 1024 })
       if (localOnly) {
-        const noDestination = Layer.succeed(
-          Destination,
-          Destination.of({
-            baseUrl: "local-only",
-            putLive: () => Effect.succeed(0),
-            syncDaily: () => Effect.succeed(0),
-          }),
-        )
-        return yield* runCollector(address).pipe(
-          Effect.provide(Layer.merge(collectorServices, noDestination)),
-        )
+        return yield* runLocalCollector(address).pipe(Effect.provide(collectorServices))
       }
       const destination = yield* configuredDestinationLayer(config, configPath)
       return yield* runCollector({
@@ -359,10 +361,9 @@ const authCommand = Command.make("auth").pipe(
 
 const serviceDefinition = Effect.fn("Cli.serviceDefinition")(function* () {
   const configPath = yield* selectedConfigPath()
-  yield* requireCollector(yield* configuration())
   return yield* makeServiceDefinition({
     configPath,
-    executablePath: environment.LUMEN_EXECUTABLE_PATH ?? process.argv[1] ?? "lumen-sync",
+    executablePath: resolve(environment.LUMEN_EXECUTABLE_PATH ?? process.argv[1] ?? "lumen-sync"),
     host: hostPaths(),
   })
 })
@@ -372,6 +373,7 @@ const serviceCommand = Command.make("service").pipe(
   Command.withSubcommands([
     Command.make("install", {}, () =>
       Effect.gen(function* () {
+        yield* requireCollector(yield* configuration())
         const definition = yield* serviceDefinition()
         yield* installService(definition)
         yield* Console.log(`Installed ${definition.artifact.path}`)

@@ -2,7 +2,15 @@
   "name": "@lumen-build/sync",
   "version": "0.1.0",
   "description": "Effect-native agent usage collection and synchronization toolkit",
+  "homepage": "https://github.com/lumen-build/sync#readme",
+  "bugs": {
+    "url": "https://github.com/lumen-build/sync/issues"
+  },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lumen-build/sync.git"
+  },
   "bin": {
     "lumen-sync": "./dist/cli.js"
   },
@@ -20,6 +28,9 @@
       "types": "./dist/types/packages/sync/src/opencode.d.ts",
       "import": "./dist/opencode.js"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "bun run clean && bun build ./src/index.ts ./src/opencode.ts ./src/cli.ts --outdir ./dist --target bun --format esm --external effect --external @effect/platform-bun --external @decimalturn/toml-patch --external ccusage --external jsonc-parser --external protobufjs && tsc --project ./tsconfig.types.json --declaration --emitDeclarationOnly --outDir ./dist/types --rootDir ../.. && node ./scripts/rewrite-declarations.mjs",
@@ -45,5 +56,8 @@
     "@lumen-build/sync-otlp": "workspace:*",
     "@lumen-build/sync-reconciliation": "workspace:*",
     "@lumen-build/sync-service": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.3.4"
   }
 }

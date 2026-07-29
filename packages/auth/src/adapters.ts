@@ -171,24 +171,6 @@ const openBrowser = (url: string) =>
       }),
   })
 
-interface PendingAuthorization {
-  readonly promise: Promise<{ readonly code: string; readonly state: string }>
-  readonly reject: (cause: Error) => void
-  readonly resolve: (value: { readonly code: string; readonly state: string }) => void
-}
-
-const pendingAuthorization = (): PendingAuthorization => {
-  let resolve!: PendingAuthorization["resolve"]
-  let reject!: PendingAuthorization["reject"]
-  const promise = new Promise<{ readonly code: string; readonly state: string }>(
-    (resolvePromise, rejectPromise) => {
-      resolve = resolvePromise
-      reject = rejectPromise
-    },
-  )
-  return { promise, reject, resolve }
-}
-
 export const localAuthorizationCodeReceiverLayer: Layer.Layer<AuthorizationCodeReceiver> =
   Layer.succeed(
     AuthorizationCodeReceiver,
@@ -214,7 +196,7 @@ export const localAuthorizationCodeReceiverLayer: Layer.Layer<AuthorizationCodeR
             })
           }
 
-          const pending = pendingAuthorization()
+          const pending = Promise.withResolvers<{ readonly code: string; readonly state: string }>()
           return yield* Effect.acquireUseRelease(
             Effect.try({
               try: () =>

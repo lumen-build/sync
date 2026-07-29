@@ -12,6 +12,7 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
+    "package:check": "bun run build && bun ./scripts/package-smoke.mjs",
     "test": "vitest run && bun test .bun.test.ts",
     "test:watch": "vitest",
     "typecheck": "turbo run typecheck"

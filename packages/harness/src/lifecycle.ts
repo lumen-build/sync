@@ -4,7 +4,7 @@ import { dirname } from "node:path"
 import { Effect, Schema } from "effect"
 
 import { prepareConfiguration, prepareRemoval } from "./configuration"
-import type { Harness, ManagedChange } from "./model"
+import { Harness, managedPathKey, managedValuesEqual, type ManagedChange } from "./model"
 import type { HarnessPaths } from "./paths"
 
 const ManagedValueSchema = Schema.Union([
@@ -22,7 +22,7 @@ const OwnershipRecord = Schema.Struct({
   changes: Schema.Array(ManagedChangeSchema),
   collectorUrl: Schema.String,
   hadOriginal: Schema.Boolean,
-  harness: Schema.String,
+  harness: Harness,
   path: Schema.String,
 })
 
@@ -125,6 +125,18 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
     readOptional(path),
     readOwnership(paths.ownership),
   ])
+  const invalidRecord = ownership.records.find(
+    (record) => record.path !== paths.configurations[record.harness],
+  )
+  if (invalidRecord !== undefined) {
+    return yield* Effect.fail(
+      fileError(
+        "validate harness ownership",
+        paths.ownership,
+        `recorded path does not match ${invalidRecord.harness} configuration`,
+      ),
+    )
+  }
   const prepared = yield* prepareConfiguration({
     collectorUrl,
     contents: snapshot?.contents ?? "",
@@ -134,8 +146,17 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
   if (prepared.changes.length === 0) return prepared
 
   yield* writeAtomic(path, prepared.contents, snapshot?.mode ?? 0o600)
+  const previousRecord = ownership.records.find((candidate) => candidate.harness === harness)
+  const ownedChanges = prepared.changes.map((change) => {
+    const previous = previousRecord?.changes.find(
+      (candidate) =>
+        managedPathKey(candidate.path) === managedPathKey(change.path) &&
+        managedValuesEqual(candidate.after, change.before),
+    )
+    return previous === undefined ? change : { ...change, before: previous.before }
+  })
   const record = {
-    changes: prepared.changes,
+    changes: ownedChanges,
     collectorUrl,
     hadOriginal: snapshot !== undefined,
     harness,
@@ -168,6 +189,18 @@ export const removeHarness = Effect.fn("HarnessLifecycle.remove")(function* ({
   paths,
 }: RemoveHarnessInput) {
   const ownership = yield* readOwnership(paths.ownership)
+  const invalidRecord = ownership.records.find(
+    (candidate) => candidate.path !== paths.configurations[candidate.harness],
+  )
+  if (invalidRecord !== undefined) {
+    return yield* Effect.fail(
+      fileError(
+        "validate harness ownership",
+        paths.ownership,
+        `recorded path does not match ${invalidRecord.harness} configuration`,
+      ),
+    )
+  }
   const record = ownership.records.find((candidate) => candidate.harness === harness)
   if (record === undefined) return { preserved: [], restored: [] }
   const snapshot = yield* readOptional(record.path)

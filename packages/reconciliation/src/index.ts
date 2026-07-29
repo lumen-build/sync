@@ -6,6 +6,7 @@ import type {
   UsageSnapshot,
   UsageTokens,
 } from "@lumen-build/sync-contracts"
+import { emptyUsageTokens, usageSnapshotKey } from "@lumen-build/sync-contracts"
 import { Context, Effect, Layer, Schema } from "effect"
 
 export interface UsageBaseline extends UsageSnapshot {}
@@ -66,18 +67,6 @@ export class Reconciliation extends Context.Service<Reconciliation, Interface>()
   "@lumen-build/sync/Reconciliation",
 ) {}
 
-const zeroTokens = (): UsageTokens => ({
-  cacheCreationInput: 0,
-  cacheReadInput: 0,
-  input: 0,
-  output: 0,
-  reasoningOutput: 0,
-  tool: 0,
-})
-
-const usageKey = (snapshot: UsageSnapshot): string =>
-  [snapshot.day, snapshot.agent, snapshot.provider, snapshot.model].join("\u0000")
-
 const modelKey = (snapshot: UsageSnapshot): string =>
   [snapshot.day, snapshot.agent, snapshot.model].join("\u0000")
 
@@ -85,7 +74,7 @@ const costKey = (snapshot: UsageCostSnapshot): string =>
   [snapshot.day, snapshot.agent].join("\u0000")
 
 const compareUsage = (left: UsageSnapshot, right: UsageSnapshot): number =>
-  usageKey(left).localeCompare(usageKey(right))
+  usageSnapshotKey(left).localeCompare(usageSnapshotKey(right))
 
 const compareCosts = (left: UsageCostSnapshot, right: UsageCostSnapshot): number =>
   costKey(left).localeCompare(costKey(right))
@@ -106,20 +95,30 @@ const withoutCostRevision = (snapshot: OtelUsageCostSnapshot): UsageCostSnapshot
   unpricedEvents: snapshot.unpricedEvents,
 })
 
-const matchingLive = (
-  target: UsageSnapshot,
+const indexBy = <Value>(
+  values: ReadonlyArray<Value>,
+  key: (value: Value) => string,
+): ReadonlyMap<string, Value> => new Map(values.map((value) => [key(value), value]))
+
+const makeLiveMatcher = (
   ccusage: ReadonlyArray<UsageSnapshot>,
   otel: ReadonlyArray<OtelUsageSnapshot>,
-): OtelUsageSnapshot | undefined => {
-  const exact = otel.find((snapshot) => usageKey(snapshot) === usageKey(target))
-  if (exact !== undefined) return exact
-
-  const candidates = ccusage.filter((snapshot) => modelKey(snapshot) === modelKey(target))
-  if (candidates.length !== 1) return undefined
-
-  return otel.find(
-    (snapshot) => snapshot.provider === "unknown" && modelKey(snapshot) === modelKey(target),
+) => {
+  const exact = indexBy(otel, usageSnapshotKey)
+  const modelCounts = new Map<string, number>()
+  for (const snapshot of ccusage) {
+    const key = modelKey(snapshot)
+    modelCounts.set(key, (modelCounts.get(key) ?? 0) + 1)
+  }
+  const unknownProvider = new Map(
+    otel
+      .filter((snapshot) => snapshot.provider === "unknown")
+      .map((snapshot) => [modelKey(snapshot), snapshot]),
   )
+
+  return (target: UsageSnapshot): OtelUsageSnapshot | undefined =>
+    exact.get(usageSnapshotKey(target)) ??
+    (modelCounts.get(modelKey(target)) === 1 ? unknownProvider.get(modelKey(target)) : undefined)
 }
 
 const addDelta = (
@@ -165,37 +164,43 @@ export const captureBaseline = ({
 }: BaselineCaptureInput): {
   readonly baselines: ReadonlyArray<UsageBaseline>
   readonly costBaselines: ReadonlyArray<UsageCostBaseline>
-} => ({
-  baselines: ccusage.map((snapshot) => {
-    const current = matchingLive(snapshot, ccusage, otel)
-    return {
-      ...snapshot,
-      tokens: current?.tokens ?? zeroTokens(),
-    }
-  }),
-  costBaselines: ccusageCosts.map((snapshot) => {
-    const current = otelCosts.find((candidate) => costKey(candidate) === costKey(snapshot))
-    return {
-      ...snapshot,
-      estimatedCostNanoUsd: current?.estimatedCostNanoUsd ?? 0,
-      unpricedEvents: current?.unpricedEvents ?? 0,
-    }
-  }),
-})
+} => {
+  const matchingLive = makeLiveMatcher(ccusage, otel)
+  const currentCosts = indexBy(otelCosts, costKey)
+  return {
+    baselines: ccusage.map((snapshot) => {
+      const current = matchingLive(snapshot)
+      return {
+        ...snapshot,
+        tokens: current?.tokens ?? emptyUsageTokens(),
+      }
+    }),
+    costBaselines: ccusageCosts.map((snapshot) => {
+      const current = currentCosts.get(costKey(snapshot))
+      return {
+        ...snapshot,
+        estimatedCostNanoUsd: current?.estimatedCostNanoUsd ?? 0,
+        unpricedEvents: current?.unpricedEvents ?? 0,
+      }
+    }),
+  }
+}
 
 const canonicalUsage = (input: ReconciliationInput): ReadonlyArray<UsageSnapshot> => {
   const matchedLive = new Set<OtelUsageSnapshot>()
+  const matchingLive = makeLiveMatcher(input.ccusage, input.otel)
+  const baselines = indexBy(input.baselines, usageSnapshotKey)
   const imported = input.ccusage.map((snapshot) => {
-    const current = matchingLive(snapshot, input.ccusage, input.otel)
+    const current = matchingLive(snapshot)
     if (current !== undefined) matchedLive.add(current)
-    const baseline = input.baselines.find((candidate) => usageKey(candidate) === usageKey(snapshot))
+    const baseline = baselines.get(usageSnapshotKey(snapshot))
 
     return {
       ...snapshot,
       tokens: addDelta(
         snapshot.tokens,
-        current?.tokens ?? zeroTokens(),
-        baseline?.tokens ?? zeroTokens(),
+        current?.tokens ?? emptyUsageTokens(),
+        baseline?.tokens ?? emptyUsageTokens(),
       ),
     }
   })
@@ -208,12 +213,12 @@ const canonicalUsage = (input: ReconciliationInput): ReadonlyArray<UsageSnapshot
 
 const canonicalCosts = (input: ReconciliationInput): ReadonlyArray<UsageCostSnapshot> => {
   const matchedLive = new Set<OtelUsageCostSnapshot>()
+  const currentCosts = indexBy(input.otelCosts, costKey)
+  const baselines = indexBy(input.costBaselines, costKey)
   const imported = input.ccusageCosts.map((snapshot) => {
-    const current = input.otelCosts.find((candidate) => costKey(candidate) === costKey(snapshot))
+    const current = currentCosts.get(costKey(snapshot))
     if (current !== undefined) matchedLive.add(current)
-    const baseline = input.costBaselines.find(
-      (candidate) => costKey(candidate) === costKey(snapshot),
-    )
+    const baseline = baselines.get(costKey(snapshot))
     const amountDelta = Math.max(
       (current?.estimatedCostNanoUsd ?? 0) - (baseline?.estimatedCostNanoUsd ?? 0),
       0,
@@ -246,9 +251,9 @@ export const make = Effect.succeed(
         })
       }
 
-      yield* ensureUnique("ccusage usage", input.ccusage, usageKey)
-      yield* ensureUnique("OTEL usage", input.otel, usageKey)
-      yield* ensureUnique("usage baseline", input.baselines, usageKey)
+      yield* ensureUnique("ccusage usage", input.ccusage, usageSnapshotKey)
+      yield* ensureUnique("OTEL usage", input.otel, usageSnapshotKey)
+      yield* ensureUnique("usage baseline", input.baselines, usageSnapshotKey)
       yield* ensureUnique("ccusage cost", input.ccusageCosts, costKey)
       yield* ensureUnique("OTEL cost", input.otelCosts, costKey)
       yield* ensureUnique("cost baseline", input.costBaselines, costKey)
@@ -281,15 +286,17 @@ export const make = Effect.succeed(
         }
       }
 
+      const usageBaselines = new Set(input.baselines.map(usageSnapshotKey))
       for (const snapshot of input.ccusage) {
-        if (!input.baselines.some((baseline) => usageKey(baseline) === usageKey(snapshot))) {
+        if (!usageBaselines.has(usageSnapshotKey(snapshot))) {
           return yield* new InvalidInput({
-            reason: `missing usage baseline: ${usageKey(snapshot).replaceAll("\u0000", "/")}`,
+            reason: `missing usage baseline: ${usageSnapshotKey(snapshot).replaceAll("\u0000", "/")}`,
           })
         }
       }
+      const costBaselines = new Set(input.costBaselines.map(costKey))
       for (const snapshot of input.ccusageCosts) {
-        if (!input.costBaselines.some((baseline) => costKey(baseline) === costKey(snapshot))) {
+        if (!costBaselines.has(costKey(snapshot))) {
           return yield* new InvalidInput({
             reason: `missing cost baseline: ${costKey(snapshot).replaceAll("\u0000", "/")}`,
           })

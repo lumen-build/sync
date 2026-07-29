@@ -118,6 +118,32 @@ it.effect("keeps Codex TOML comments and uses binary OTLP", () =>
   }),
 )
 
+it.effect("adds and removes the OpenCode plugin without disturbing other plugins", () =>
+  Effect.gen(function* () {
+    const configured = yield* prepareConfiguration({
+      collectorUrl,
+      contents: '{ "plugin": ["existing-plugin"] }\n',
+      force: false,
+      harness: "opencode",
+    })
+    expect(JSON.parse(configured.contents).plugin).toEqual([
+      "existing-plugin",
+      "@lumen-build/sync/opencode",
+    ])
+
+    const removed = yield* prepareRemoval({
+      changes: configured.changes,
+      collectorUrl,
+      contents: configured.contents.replace(
+        '"@lumen-build/sync/opencode"',
+        '"@lumen-build/sync/opencode", "added-after-sync"',
+      ),
+      harness: "opencode",
+    })
+    expect(JSON.parse(removed.contents).plugin).toEqual(["existing-plugin", "added-after-sync"])
+  }),
+)
+
 it("resolves all supported operating-system configuration locations", () => {
   const mac = makeHarnessPaths({ home: "/Users/dev", platform: "darwin" })
   const linux = makeHarnessPaths({ home: "/home/dev", platform: "linux" })
@@ -129,5 +155,7 @@ it("resolves all supported operating-system configuration locations", () => {
 
   expect(mac.configurations.vscode).toContain("Library/Application Support/Code")
   expect(linux.configurations.opencode).toBe("/home/dev/.config/opencode/opencode.json")
-  expect(windows.configurations.vscode).toContain("AppData\\Roaming/Code/User/settings.json")
+  expect(windows.configurations.vscode).toBe(
+    "C:\\Users\\dev\\AppData\\Roaming\\Code\\User\\settings.json",
+  )
 })

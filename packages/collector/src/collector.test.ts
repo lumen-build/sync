@@ -110,8 +110,11 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
     const store = yield* LiveUsageStore
     const events = yield* normalizer.normalize(attributes("opencode-mocked-agent"))
 
+    expect(yield* store.generation).toBe(0)
     expect(yield* store.ingest(events)).toBe(1)
+    expect(yield* store.generation).toBe(1)
     expect(yield* store.ingest(events)).toBe(0)
+    expect(yield* store.generation).toBe(1)
     const first = yield* store.snapshot("2026-07-29T10:01:00.000Z")
     expect(first.snapshots[0]?.revision).toBe(1)
 
@@ -131,6 +134,46 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
       tokens: { input: 24, output: 6 },
     })
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
+it.effect("bounds live fingerprint retention and prunes old buckets", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+    const event = (fingerprint: string, occurredAt: string) => ({
+      agent: "opencode" as const,
+      fingerprint,
+      model: "mocked-model",
+      occurredAt,
+      provider: "mocked-provider",
+      sourceName: "mocked",
+      sourceSignal: "logs" as const,
+      tokens: {
+        cacheCreationInput: 0,
+        cacheReadInput: 0,
+        input: 1,
+        output: 0,
+        reasoningOutput: 0,
+        tool: 0,
+      },
+    })
+
+    expect(yield* store.ingest([event("day-one", "2026-07-01T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([event("day-two", "2026-07-02T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([event("day-three", "2026-07-03T00:00:00.000Z")])).toBe(1)
+    const snapshot = yield* store.snapshot("2026-07-03T00:01:00.000Z")
+    expect(snapshot.snapshots.map(({ day }) => day)).toEqual(["2026-07-02", "2026-07-03"])
+
+    expect(yield* store.ingest([event("day-one", "2026-07-03T00:02:00.000Z")])).toBe(1)
+  }).pipe(
+    Effect.provide(
+      collectorLayer({
+        deviceId,
+        maxBodyBytes: 1_000_000,
+        maxFingerprints: 2,
+        retentionDays: 2,
+      }),
+    ),
+  ),
 )
 
 it.effect("accepts mocked JSON and protobuf OTLP requests", () =>
@@ -237,4 +280,35 @@ it.effect("accepts mocked JSON and protobuf OTLP requests", () =>
     expect(snapshot.snapshots).toHaveLength(2)
     expect(snapshot.snapshots.map((item) => item.agent)).toEqual(["codex", "opencode"])
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
+it.effect("rejects chunked and decompressed bodies at the configured byte limit", () =>
+  Effect.gen(function* () {
+    const collector = yield* Collector
+    const oversized = yield* collector.handle(
+      new Request("https://collector.lumen.build/v1/logs", {
+        body: "x".repeat(101),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      }),
+    )
+    expect(oversized.status).toBe(413)
+
+    const compressed = yield* Effect.promise(async () =>
+      new Response(
+        new Blob(["x".repeat(1_000)]).stream().pipeThrough(new CompressionStream("gzip")),
+      ).arrayBuffer(),
+    )
+    const decompressionBomb = yield* collector.handle(
+      new Request("https://collector.lumen.build/v1/logs", {
+        body: compressed,
+        headers: {
+          "content-encoding": "gzip",
+          "content-type": "application/json",
+        },
+        method: "POST",
+      }),
+    )
+    expect(decompressionBomb.status).toBe(413)
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 100 }))),
 )

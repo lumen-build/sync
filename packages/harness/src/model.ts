@@ -21,6 +21,15 @@ export interface ManagedChange {
   readonly path: ReadonlyArray<string>
 }
 
+const jsonEqual = Schema.toEquivalence(Schema.Json)
+
+export const managedPathKey = (path: ReadonlyArray<string>): string => path.join("\u0000")
+
+export const managedValuesEqual = (left: ManagedValue, right: ManagedValue): boolean => {
+  if (left._tag === "Absent" || right._tag === "Absent") return left._tag === right._tag
+  return jsonEqual(left.value, right.value)
+}
+
 export type ConfigurationState = "conflicting" | "exact" | "missing" | "partial"
 
 export interface PreparedConfiguration {
