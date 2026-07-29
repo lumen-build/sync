@@ -1,6 +1,3 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
-
 import type {
   OtelLiveBatch,
   OtelUsageSnapshot,
@@ -31,7 +28,7 @@ import {
   encodingFromContentType,
   layer as otlpLayer,
 } from "@lumen-build/sync-otlp"
-import { Context, Effect, Layer, Ref, Schema } from "effect"
+import { Context, Crypto, Effect, FileSystem, Layer, Path, Ref, Schema } from "effect"
 
 export interface UsageEvent {
   readonly agent: UsageSnapshot["agent"]
@@ -522,8 +519,11 @@ const checkpointError = (operation: string, cause: unknown): LiveUsageStoreError
     reason: `${operation}: ${cause instanceof Error ? cause.message : String(cause)}`,
   })
 
-const isMissingFile = (cause: unknown): boolean =>
-  typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT"
+interface CheckpointRuntime {
+  readonly crypto: Crypto.Crypto
+  readonly fileSystem: FileSystem.FileSystem
+  readonly path: Path.Path
+}
 
 const stateFromCheckpoint = (
   deviceId: string,
@@ -566,21 +566,24 @@ const stateFromCheckpoint = (
 const loadStoreState = (
   deviceId: string,
   path: string | undefined,
+  runtime: CheckpointRuntime | undefined,
 ): Effect.Effect<StoreState, LiveUsageStoreError> => {
   if (path === undefined) return Effect.succeed(emptyStoreState())
+  if (runtime === undefined) {
+    return Effect.fail(
+      new LiveUsageStoreError({
+        reason: "collector checkpoint runtime is unavailable",
+      }),
+    )
+  }
   return Effect.gen(function* () {
-    const contents = yield* Effect.tryPromise({
-      try: async () => {
-        try {
-          return await readFile(path, "utf8")
-        } catch (cause) {
-          if (isMissingFile(cause)) return undefined
-          throw cause
-        }
-      },
-      catch: (cause) => checkpointError("read collector checkpoint", cause),
-    })
-    if (contents === undefined) return emptyStoreState()
+    const exists = yield* runtime.fileSystem
+      .exists(path)
+      .pipe(Effect.mapError((cause) => checkpointError("inspect collector checkpoint", cause)))
+    if (!exists) return emptyStoreState()
+    const contents = yield* runtime.fileSystem
+      .readFileString(path)
+      .pipe(Effect.mapError((cause) => checkpointError("read collector checkpoint", cause)))
     const checkpoint = yield* Effect.try({
       try: () => JSON.parse(contents) as unknown,
       catch: (cause) => checkpointError("parse collector checkpoint", cause),
@@ -606,26 +609,33 @@ const checkpointFromState = (deviceId: string, state: StoreState): StoreCheckpoi
 const persistStoreState = (
   path: string | undefined,
   checkpoint: StoreCheckpoint,
+  runtime: CheckpointRuntime | undefined,
 ): Effect.Effect<void, LiveUsageStoreError> => {
   if (path === undefined) return Effect.void
-  return Effect.tryPromise({
-    try: async () => {
-      const directory = dirname(path)
-      const temporary = `${path}.${crypto.randomUUID()}.tmp`
-      await mkdir(directory, { mode: 0o700, recursive: true })
-      try {
-        await writeFile(temporary, `${JSON.stringify(checkpoint)}\n`, {
-          flag: "wx",
-          mode: 0o600,
-        })
-        await rename(temporary, path)
-        await chmod(path, 0o600)
-      } finally {
-        await rm(temporary, { force: true })
-      }
-    },
-    catch: (cause) => checkpointError("write collector checkpoint", cause),
-  })
+  if (runtime === undefined) {
+    return Effect.fail(
+      new LiveUsageStoreError({
+        reason: "collector checkpoint runtime is unavailable",
+      }),
+    )
+  }
+  return Effect.gen(function* () {
+    const temporary = `${path}.${yield* runtime.crypto.randomUUIDv4}.tmp`
+    yield* runtime.fileSystem.makeDirectory(runtime.path.dirname(path), {
+      mode: 0o700,
+      recursive: true,
+    })
+    yield* runtime.fileSystem
+      .writeFileString(temporary, `${JSON.stringify(checkpoint)}\n`, {
+        flag: "wx",
+        mode: 0o600,
+      })
+      .pipe(
+        Effect.andThen(runtime.fileSystem.rename(temporary, path)),
+        Effect.andThen(runtime.fileSystem.chmod(path, 0o600)),
+        Effect.ensuring(runtime.fileSystem.remove(temporary, { force: true }).pipe(Effect.ignore)),
+      )
+  }).pipe(Effect.mapError((cause) => checkpointError("write collector checkpoint", cause)))
 }
 
 const checkedAddUsageTokens = (left: UsageTokens, right: UsageTokens): UsageTokens | undefined => {
@@ -731,7 +741,15 @@ const storeLayer = (
   Layer.effect(
     LiveUsageStore,
     Effect.gen(function* () {
-      const state = yield* Ref.make(yield* loadStoreState(deviceId, statePath))
+      const runtime =
+        statePath === undefined
+          ? undefined
+          : {
+              crypto: yield* Crypto.Crypto,
+              fileSystem: yield* FileSystem.FileSystem,
+              path: yield* Path.Path,
+            }
+      const state = yield* Ref.make(yield* loadStoreState(deviceId, statePath, runtime))
 
       const ingest = Effect.fn("LiveUsageStore.ingest")(function* (
         events: ReadonlyArray<UsageEvent>,
@@ -884,7 +902,7 @@ const storeLayer = (
       return LiveUsageStore.of({
         checkpoint: Ref.get(state).pipe(
           Effect.flatMap((current) =>
-            persistStoreState(statePath, checkpointFromState(deviceId, current)),
+            persistStoreState(statePath, checkpointFromState(deviceId, current), runtime),
           ),
         ),
         generation: Ref.get(state).pipe(Effect.map((current) => current.generation)),
@@ -1048,13 +1066,35 @@ const makeCollectorLayer = (maxBodyBytes: number) =>
     }),
   )
 
-export const collectorLayer = ({
+export type CollectorServices = Collector | LiveUsageStore | OtlpCodec | UsageNormalizer
+
+export type CollectorRuntime = Crypto.Crypto | FileSystem.FileSystem | Path.Path
+
+export type PersistentCollectorOptions = Omit<CollectorOptions, "statePath"> & {
+  readonly statePath: string
+}
+
+export type MemoryCollectorOptions = Omit<CollectorOptions, "statePath"> & {
+  readonly statePath?: never
+}
+
+export function collectorLayer(
+  options: PersistentCollectorOptions,
+): Layer.Layer<CollectorServices, LiveUsageStoreError, CollectorRuntime>
+export function collectorLayer(
+  options: MemoryCollectorOptions,
+): Layer.Layer<CollectorServices, LiveUsageStoreError>
+export function collectorLayer({
   deviceId,
   maxBodyBytes,
   maxFingerprints = 100_000,
   retentionDays = 45,
   statePath,
-}: CollectorOptions) => {
+}: PersistentCollectorOptions | MemoryCollectorOptions): Layer.Layer<
+  CollectorServices,
+  LiveUsageStoreError,
+  CollectorRuntime
+> {
   const boundedFingerprints = Math.max(1, Math.trunc(maxFingerprints))
   const boundedRetentionDays = Math.max(1, Math.trunc(retentionDays))
   const dependencies = Layer.mergeAll(

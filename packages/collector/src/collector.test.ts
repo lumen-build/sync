@@ -2,6 +2,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import * as BunServices from "@effect/platform-bun/BunServices"
 import type { OtelLiveBatch } from "@lumen-build/sync-contracts"
 import { encodeRequest, type DecodedTelemetry } from "@lumen-build/sync-otlp"
 import { Effect } from "effect"
@@ -258,7 +259,7 @@ it.effect("restores acknowledged revisions and fingerprints from a private check
       })
     },
     (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(BunServices.layer)),
 )
 
 it.effect("bounds live fingerprint retention and prunes old buckets", () =>
