@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const temporary = mkdtempSync(join(tmpdir(), "lumen-sync-package-"))
@@ -23,31 +23,46 @@ try {
     stdio: "ignore",
   })
 
-  const installed = join(temporary, "node_modules", "@lumen-build", "sync")
-  execFileSync(process.execPath, [join(installed, "dist", "cli.js"), "--help"], {
+  const executable = join(
+    temporary,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "lumen-sync.cmd" : "lumen-sync",
+  )
+  execFileSync(executable, ["--help"], {
     cwd: temporary,
     stdio: "ignore",
   })
-  const api = await import(pathToFileURL(join(installed, "dist", "index.js")).href)
-  for (const name of [
-    "Auth",
-    "Ccusage",
-    "Collector",
-    "Config",
-    "Contracts",
-    "DeviceIdentity",
-    "Destination",
-    "Harness",
-    "Otlp",
-    "Reconciliation",
-    "Runtime",
-    "Service",
-  ]) {
-    if (!(name in api)) throw new Error(`published API is missing ${name}`)
-  }
-  await import(pathToFileURL(join(installed, "dist", "bun.js")).href)
-  await import(pathToFileURL(join(installed, "dist", "contracts.js")).href)
-  await import(pathToFileURL(join(installed, "dist", "opencode.js")).href)
+
+  const smokePath = join(temporary, "smoke.mjs")
+  writeFileSync(
+    smokePath,
+    [
+      'import * as api from "@lumen-build/sync"',
+      'import "@lumen-build/sync/bun"',
+      'import "@lumen-build/sync/contracts"',
+      'import "@lumen-build/sync/opencode"',
+      "",
+      `for (const name of ${JSON.stringify([
+        "Auth",
+        "Ccusage",
+        "Collector",
+        "Config",
+        "Contracts",
+        "DeviceIdentity",
+        "Destination",
+        "Harness",
+        "Otlp",
+        "Reconciliation",
+        "Runtime",
+        "Service",
+      ])}) {`,
+      "  if (!(name in api)) throw new Error(`published API is missing ${name}`)",
+      "}",
+      "",
+    ].join("\n"),
+  )
+  execFileSync(process.execPath, [smokePath], { cwd: temporary, stdio: "ignore" })
   process.stdout.write(`Package smoke passed: ${filename}\n`)
 } finally {
   rmSync(temporary, { force: true, recursive: true })

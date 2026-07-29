@@ -3,7 +3,12 @@ import { constants } from "node:fs"
 import { link, mkdir, open, rm, unlink } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import { DeviceId, SyncId } from "@lumen-build/sync-contracts"
+import { CcusageAgent } from "@lumen-build/sync-ccusage"
+import {
+  CcusageDailyBatch as CcusageDailyBatchSchema,
+  DeviceId,
+  type CcusageDailyBatch,
+} from "@lumen-build/sync-contracts"
 import { Effect, Layer, Schema } from "effect"
 
 import { DeviceIdentity, DeviceIdentityError } from "./device-identity"
@@ -14,11 +19,20 @@ import {
   type DailySyncIdKey,
 } from "./runtime"
 
-interface JournalEntry {
-  readonly key: DailySyncIdKey
-  readonly syncId: string
-  readonly version: 1
-}
+const DailySyncIdKeySchema = Schema.Struct({
+  agent: CcusageAgent,
+  deviceId: DeviceId,
+  since: Schema.String,
+  until: Schema.String,
+})
+
+const JournalEntrySchema = Schema.Struct({
+  batch: CcusageDailyBatchSchema,
+  key: DailySyncIdKeySchema,
+  version: Schema.Literal(2),
+})
+
+interface JournalEntry extends Schema.Schema.Type<typeof JournalEntrySchema> {}
 
 const keyText = (key: DailySyncIdKey): string =>
   JSON.stringify([key.deviceId, key.agent, key.since, key.until])
@@ -38,19 +52,17 @@ const isMissing = (cause: unknown): boolean =>
 const isExisting = (cause: unknown): boolean =>
   typeof cause === "object" && cause !== null && "code" in cause && cause.code === "EEXIST"
 
-const isSyncId = Schema.is(SyncId)
-
 const decodeEntry = (path: string, contents: string, expectedKey: DailySyncIdKey): JournalEntry => {
-  const decoded = JSON.parse(contents) as Partial<JournalEntry>
+  const decoded = Schema.decodeUnknownSync(JournalEntrySchema, {
+    onExcessProperty: "error",
+  })(JSON.parse(contents))
   if (
-    decoded.version !== 1 ||
-    decoded.key === undefined ||
     keyText(decoded.key) !== keyText(expectedKey) ||
-    !isSyncId(decoded.syncId)
+    decoded.batch.deviceId !== expectedKey.deviceId
   ) {
     throw new Error(`invalid daily sync journal entry at ${path}`)
   }
-  return decoded as JournalEntry
+  return decoded
 }
 
 const readOptionalEntry = async (
@@ -79,7 +91,7 @@ const persistEntry = async (
   directory: string,
   path: string,
   entry: JournalEntry,
-): Promise<string> => {
+): Promise<CcusageDailyBatch> => {
   await mkdir(directory, { mode: 0o700, recursive: true })
   const temporary = join(directory, `.${crypto.randomUUID()}.tmp`)
   try {
@@ -93,12 +105,12 @@ const persistEntry = async (
     }
     try {
       await link(temporary, path)
-      return entry.syncId
+      return entry.batch
     } catch (cause) {
       if (!isExisting(cause)) throw cause
       const existing = await readOptionalEntry(path, entry.key)
       if (existing === undefined) return persistEntry(directory, path, entry)
-      return existing.syncId
+      return existing.batch
     }
   } finally {
     await rm(temporary, { force: true })
@@ -106,19 +118,30 @@ const persistEntry = async (
 }
 
 const makeFileDailySyncIdJournal = (directory: string): DailySyncIdJournal => ({
-  getOrCreate: (key) =>
-    Effect.tryPromise({
-      try: async () => {
-        const path = entryPath(directory, key)
-        const existing = await readOptionalEntry(path, key)
-        if (existing !== undefined) return existing.syncId
-        return persistEntry(directory, path, {
-          key,
-          syncId: crypto.randomUUID(),
-          version: 1,
-        })
-      },
-      catch: (cause) => journalError("get or create daily sync ID", cause),
+  getOrCreateBatch: (key, create) =>
+    Effect.gen(function* () {
+      const existing = yield* Effect.tryPromise({
+        try: async () => {
+          const path = entryPath(directory, key)
+          return readOptionalEntry(path, key)
+        },
+        catch: (cause) => journalError("read daily sync batch", cause),
+      })
+      if (existing !== undefined) return existing.batch
+
+      const batch = yield* create(crypto.randomUUID())
+      const entry = yield* Schema.decodeUnknownEffect(JournalEntrySchema, {
+        onExcessProperty: "error",
+      })({ batch, key, version: 2 }).pipe(
+        Effect.mapError((cause) => journalError("validate daily sync batch", cause)),
+      )
+      return yield* Effect.tryPromise({
+        try: async () => {
+          const path = entryPath(directory, key)
+          return persistEntry(directory, path, entry)
+        },
+        catch: (cause) => journalError("persist daily sync batch", cause),
+      })
     }),
   remove: (key, syncId) =>
     Effect.tryPromise({
@@ -126,7 +149,7 @@ const makeFileDailySyncIdJournal = (directory: string): DailySyncIdJournal => ({
         const path = entryPath(directory, key)
         const existing = await readOptionalEntry(path, key)
         if (existing === undefined) return
-        if (existing.syncId !== syncId) {
+        if (existing.batch.syncId !== syncId) {
           throw new Error(`daily sync journal entry changed before removal: ${path}`)
         }
         try {

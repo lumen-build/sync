@@ -1,5 +1,5 @@
 import { CredentialProvider, type CredentialError } from "@lumen-build/sync-auth"
-import type { CcusageDailyBatch, OtelLiveBatch } from "@lumen-build/sync-contracts"
+import { type CcusageDailyBatch, type OtelLiveBatch, SyncId } from "@lumen-build/sync-contracts"
 import { Context, Effect, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 
@@ -7,7 +7,7 @@ const Accepted = Schema.Struct({ accepted: Schema.Number })
 const SyncCommitted = Schema.Struct({ committed: Schema.Number })
 const SyncStarted = Schema.Struct({
   status: Schema.Literal("pending"),
-  syncId: Schema.String,
+  syncId: SyncId,
 })
 
 export class DestinationUnavailable extends Schema.TaggedErrorClass<DestinationUnavailable>()(
@@ -124,7 +124,12 @@ export const make = Effect.fn("Destination.make")(function* ({
         timeZone: batch.timeZone,
       },
     )
-    yield* execute(start, SyncStarted)
+    const started = yield* execute(start, SyncStarted)
+    if (started.syncId !== batch.syncId) {
+      return yield* new InvalidDestinationResponse({
+        reason: "start response sync ID does not match request",
+      })
+    }
 
     const snapshots = yield* withJsonBody(
       authenticated(

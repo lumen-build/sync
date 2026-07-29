@@ -5,7 +5,12 @@ import {
   type CcusageAgent,
 } from "@lumen-build/sync-ccusage"
 import { CollectorServer, LiveUsageStore } from "@lumen-build/sync-collector"
-import { Destination } from "@lumen-build/sync-destination"
+import type { CcusageDailyBatch } from "@lumen-build/sync-contracts"
+import {
+  Destination,
+  DestinationRejected,
+  DestinationUnavailable,
+} from "@lumen-build/sync-destination"
 import { Clock, Console, Context, Effect, Ref, Schema } from "effect"
 
 export interface DailySyncIdKey {
@@ -24,7 +29,10 @@ export class DailySyncIdJournalError extends Schema.TaggedErrorClass<DailySyncId
 ) {}
 
 export interface DailySyncIdJournal {
-  readonly getOrCreate: (key: DailySyncIdKey) => Effect.Effect<string, DailySyncIdJournalError>
+  readonly getOrCreateBatch: <E, R>(
+    key: DailySyncIdKey,
+    create: (syncId: string) => Effect.Effect<CcusageDailyBatch, E, R>,
+  ) => Effect.Effect<CcusageDailyBatch, DailySyncIdJournalError | E, R>
   readonly remove: (
     key: DailySyncIdKey,
     syncId: string,
@@ -72,24 +80,28 @@ export const syncDaily = Effect.fn("SyncRuntime.syncDaily")(function* ({
     agents,
     (agent) =>
       Effect.gen(function* () {
-        const output = yield* command.runDaily({ agent, since, until })
         const key = { agent, deviceId, since, until } satisfies DailySyncIdKey
-        const syncId = yield* syncIds.getOrCreate(key)
-        const batch = yield* importer.importDaily({
-          agent,
-          capturedAt,
-          deviceId,
-          sourceVersion: CCUSAGE_VERSION,
-          stdout: output.stdout,
-          syncId,
-        })
+        const batch = yield* syncIds.getOrCreateBatch(
+          key,
+          Effect.fn("SyncRuntime.createDailyBatch")(function* (syncId) {
+            const output = yield* command.runDaily({ agent, since, until })
+            return yield* importer.importDaily({
+              agent,
+              capturedAt,
+              deviceId,
+              sourceVersion: CCUSAGE_VERSION,
+              stdout: output.stdout,
+              syncId,
+            })
+          }),
+        )
         const committed = yield* destination.syncDaily(batch)
-        yield* syncIds.remove(key, syncId)
+        yield* syncIds.remove(key, batch.syncId)
         return {
           agent,
           committed,
           snapshots: batch.snapshots.length,
-          syncId,
+          syncId: batch.syncId,
         } satisfies DailySyncResult
       }),
     { concurrency: 2 },
@@ -150,6 +162,13 @@ const uploadLive = Effect.fn("SyncRuntime.uploadLive")(function* (uploadedGenera
   return { accepted, generation }
 })
 
+const isRetryableLiveUploadError = (
+  error: unknown,
+): error is DestinationRejected | DestinationUnavailable =>
+  error instanceof DestinationUnavailable ||
+  (error instanceof DestinationRejected &&
+    (error.status === 429 || (error.status >= 500 && error.status < 600)))
+
 export const runLiveUploads = Effect.fn("SyncRuntime.runLiveUploads")(function* ({
   reporter = consoleReporter,
   uploadIntervalMilliseconds,
@@ -165,7 +184,7 @@ export const runLiveUploads = Effect.fn("SyncRuntime.runLiveUploads")(function* 
         yield* reporter.uploadSucceeded(result.accepted)
       }),
     ),
-    Effect.catch((error) => reporter.uploadFailed(error)),
+    Effect.catchIf(isRetryableLiveUploadError, (error) => reporter.uploadFailed(error)),
   )
   return yield* upload.pipe(Effect.forever)
 })

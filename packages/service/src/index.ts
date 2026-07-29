@@ -51,6 +51,7 @@ export interface DefinitionOptions {
   readonly configPath: string
   readonly executablePath: string
   readonly host: ServiceHost
+  readonly prefixArguments?: ReadonlyArray<string>
 }
 
 export class InvalidServiceDefinition extends Schema.TaggedErrorClass<InvalidServiceDefinition>()(
@@ -146,6 +147,7 @@ const windowsArgument = (value: string): string => {
 
 const launchdDefinition = (
   executablePath: string,
+  prefixArguments: ReadonlyArray<string>,
   configPath: string,
   host: ServiceHost,
 ): ServiceDefinition => {
@@ -170,11 +172,9 @@ const launchdDefinition = (
     `  <string>${label}</string>`,
     "  <key>ProgramArguments</key>",
     "  <array>",
-    `    <string>${plist(executablePath)}</string>`,
-    "    <string>collector</string>",
-    "    <string>run</string>",
-    "    <string>--config</string>",
-    `    <string>${plist(configPath)}</string>`,
+    ...[executablePath, ...prefixArguments, "collector", "run", "--config", configPath].map(
+      (argument) => `    <string>${plist(argument)}</string>`,
+    ),
     "  </array>",
     "  <key>KeepAlive</key>",
     "  <true/>",
@@ -209,6 +209,7 @@ const launchdDefinition = (
 
 const systemdDefinition = (
   executablePath: string,
+  prefixArguments: ReadonlyArray<string>,
   configPath: string,
   host: ServiceHost,
 ): ServiceDefinition => {
@@ -218,7 +219,14 @@ const systemdDefinition = (
     stderr: "journalctl --user --unit lumen-sync.service",
     stdout: "journalctl --user --unit lumen-sync.service",
   }
-  const commandArguments = [executablePath, "collector", "run", "--config", configPath]
+  const commandArguments = [
+    executablePath,
+    ...prefixArguments,
+    "collector",
+    "run",
+    "--config",
+    configPath,
+  ]
     .map(systemdArgument)
     .join(" ")
   const contents = [
@@ -252,6 +260,7 @@ const systemdDefinition = (
 
 const windowsDefinition = (
   executablePath: string,
+  prefixArguments: ReadonlyArray<string>,
   configPath: string,
   host: ServiceHost,
 ): ServiceDefinition => {
@@ -262,7 +271,7 @@ const windowsDefinition = (
     stderr: joinHost(host.platform, root, "collector.stderr.log"),
     stdout: joinHost(host.platform, root, "collector.stdout.log"),
   }
-  const commandArguments = ["collector", "run", "--config", configPath]
+  const commandArguments = [...prefixArguments, "collector", "run", "--config", configPath]
     .map(windowsArgument)
     .join(" ")
   const contents = [
@@ -301,16 +310,20 @@ export const makeServiceDefinition = Effect.fn("ServiceDefinition.make")(functio
   configPath,
   executablePath,
   host,
+  prefixArguments = [],
 }: DefinitionOptions) {
   const executable = yield* validatePath("executablePath", executablePath)
+  const prefix = yield* Effect.forEach(prefixArguments, (argument, index) =>
+    validatePath(`prefixArguments[${index}]`, argument),
+  )
   const config = yield* validatePath("configPath", configPath)
   switch (host.platform) {
     case "darwin":
-      return launchdDefinition(executable, config, host)
+      return launchdDefinition(executable, prefix, config, host)
     case "linux":
-      return systemdDefinition(executable, config, host)
+      return systemdDefinition(executable, prefix, config, host)
     case "win32":
-      return windowsDefinition(executable, config, host)
+      return windowsDefinition(executable, prefix, config, host)
   }
 })
 

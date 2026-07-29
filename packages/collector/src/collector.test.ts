@@ -33,6 +33,8 @@ const attributes = (serviceName: string): Extract<DecodedTelemetry, { readonly _
 
 const logRequest = (
   records: ReadonlyArray<{
+    readonly cost?: number | string
+    readonly eventId?: string
     readonly input?: number
     readonly model?: string
     readonly output?: number
@@ -56,6 +58,8 @@ const logRequest = (
             {
               logRecords: records.map(
                 ({
+                  cost,
+                  eventId,
                   input = 0,
                   model = "mock-model",
                   output = 0,
@@ -79,6 +83,22 @@ const logRequest = (
                       key: "gen_ai.usage.output_tokens",
                       value: { intValue: String(output) },
                     },
+                    ...(cost === undefined
+                      ? []
+                      : [
+                          {
+                            key: "gen_ai.usage.cost",
+                            value: { stringValue: String(cost) },
+                          },
+                        ]),
+                    ...(eventId === undefined
+                      ? []
+                      : [
+                          {
+                            key: "lumen.source.event_id",
+                            value: { stringValue: eventId },
+                          },
+                        ]),
                   ],
                   eventName: "gen_ai.client.inference.operation.details",
                   timeUnixNano,
@@ -93,13 +113,19 @@ const logRequest = (
     method: "POST",
   })
 
-const usageEvent = (fingerprint: string, occurredAt: string, input = 1) => ({
+const usageEvent = (
+  fingerprint: string,
+  occurredAt: string,
+  input = 1,
+  sourceReportedCostNanoUsd?: number,
+) => ({
   agent: "opencode" as const,
   fingerprint,
   model: "mocked-model",
   occurredAt,
   provider: "mocked-provider",
   sourceName: "mocked",
+  ...(sourceReportedCostNanoUsd === undefined ? {} : { sourceReportedCostNanoUsd }),
   sourceSignal: "logs" as const,
   tokens: {
     cacheCreationInput: 0,
@@ -224,20 +250,73 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )
 
+it.effect("uses OpenCode event IDs for deduplication and aggregates source-reported costs", () =>
+  Effect.gen(function* () {
+    const collector = yield* Collector
+    const store = yield* LiveUsageStore
+    const first = {
+      cost: "0.25",
+      eventId: "opencode-event-one",
+      input: 12,
+      model: "mock-model",
+      output: 3,
+      provider: "mock-provider",
+    }
+    const second = {
+      ...first,
+      eventId: "opencode-event-two",
+    }
+
+    expect((yield* collector.handle(logRequest([first, second]))).status).toBe(200)
+    expect(yield* store.generation).toBe(1)
+
+    const accepted = yield* store.snapshot("2026-07-29T10:01:00.000Z")
+    expect(accepted.snapshots).toMatchObject([
+      {
+        revision: 2,
+        tokens: { input: 24, output: 6 },
+      },
+    ])
+    expect(accepted.costs).toEqual([
+      {
+        agent: "opencode",
+        coverage: "source-reported",
+        day: "2026-07-29",
+        estimatedCostNanoUsd: 500_000_000,
+        revision: 2,
+        unpricedEvents: 0,
+      },
+    ])
+    expect(JSON.stringify(accepted)).not.toContain("opencode-event")
+
+    expect((yield* collector.handle(logRequest([first]))).status).toBe(200)
+    expect(yield* store.generation).toBe(1)
+    expect(yield* store.snapshot("2026-07-29T10:02:00.000Z")).toMatchObject({
+      costs: [{ estimatedCostNanoUsd: 500_000_000, revision: 2 }],
+      snapshots: [{ revision: 2, tokens: { input: 24, output: 6 } }],
+    })
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
 it.effect("restores acknowledged revisions and fingerprints from a private checkpoint", () =>
   Effect.acquireUseRelease(
     Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-collector-state-"))),
     (directory) => {
       const statePath = join(directory, "collector.json")
       const layer = () => collectorLayer({ deviceId, maxBodyBytes: 1_000_000, statePath })
-      const firstEvent = usageEvent("checkpoint-one", timestamp)
-      const secondEvent = usageEvent("checkpoint-two", "2026-07-29T10:01:00.000Z")
+      const firstEvent = usageEvent("checkpoint-one", timestamp, 1, 250_000_000)
+      const secondEvent = usageEvent("checkpoint-two", "2026-07-29T10:01:00.000Z", 1, 500_000_000)
 
       return Effect.gen(function* () {
         yield* Effect.gen(function* () {
           const store = yield* LiveUsageStore
           expect(yield* store.ingest([firstEvent, secondEvent])).toBe(2)
-          expect((yield* store.snapshot(timestamp)).snapshots[0]?.revision).toBe(2)
+          const snapshot = yield* store.snapshot(timestamp)
+          expect(snapshot.snapshots[0]?.revision).toBe(2)
+          expect(snapshot.costs[0]).toMatchObject({
+            estimatedCostNanoUsd: 750_000_000,
+            revision: 2,
+          })
           yield* store.checkpoint
         }).pipe(Effect.provide(layer()))
 
@@ -248,12 +327,18 @@ it.effect("restores acknowledged revisions and fingerprints from a private check
           expect(yield* store.generation).toBe(1)
           expect(yield* store.ingest([firstEvent])).toBe(0)
           expect(
-            yield* store.ingest([usageEvent("checkpoint-three", "2026-07-29T10:02:00.000Z")]),
+            yield* store.ingest([
+              usageEvent("checkpoint-three", "2026-07-29T10:02:00.000Z", 1, 125_000_000),
+            ]),
           ).toBe(1)
           const restored = yield* store.snapshot("2026-07-29T10:03:00.000Z")
           expect(restored.snapshots[0]).toMatchObject({
             revision: 3,
             tokens: { input: 3 },
+          })
+          expect(restored.costs[0]).toMatchObject({
+            estimatedCostNanoUsd: 875_000_000,
+            revision: 3,
           })
         }).pipe(Effect.provide(layer()))
       })
@@ -327,6 +412,35 @@ it.effect("rejects bucket-limit overflow atomically and remains usable", () =>
         deviceId,
         maxBodyBytes: 1_000_000,
         maxBuckets: 1,
+      }),
+    ),
+  ),
+)
+
+it.effect("reclaims expired bucket cardinality before enforcing the bucket limit", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+
+    expect(yield* store.ingest([usageEvent("old", "2026-07-01T00:00:00.000Z")])).toBe(1)
+    expect(
+      yield* store.ingest([
+        {
+          ...usageEvent("replacement", "2026-07-03T00:00:00.000Z"),
+          model: "replacement-model",
+        },
+      ]),
+    ).toBe(1)
+
+    expect(yield* store.snapshot("2026-07-03T00:01:00.000Z")).toMatchObject({
+      snapshots: [{ day: "2026-07-03", model: "replacement-model" }],
+    })
+  }).pipe(
+    Effect.provide(
+      collectorLayer({
+        deviceId,
+        maxBodyBytes: 1_000_000,
+        maxBuckets: 1,
+        retentionDays: 2,
       }),
     ),
   ),
@@ -411,6 +525,13 @@ it.effect("rejects a poisoned normalized batch without mutating the store", () =
       { input: 1, model: "good-model", provider: "x".repeat(257) },
       { input: -1, model: "good-model", provider: "good-provider" },
       { input: Number.MAX_SAFE_INTEGER + 1, model: "good-model", provider: "good-provider" },
+      { cost: -1, input: 1, model: "good-model", provider: "good-provider" },
+      {
+        cost: Number.MAX_SAFE_INTEGER,
+        input: 1,
+        model: "good-model",
+        provider: "good-provider",
+      },
     ]
 
     for (const poison of poisoned) {
@@ -459,6 +580,44 @@ it.effect("rejects checked-add overflow and remains usable", () =>
       revision: 2,
       tokens: { input: Number.MAX_SAFE_INTEGER, output: 1 },
     })
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
+it.effect("rejects source-reported cost overflow atomically and remains usable", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+    const maximum = usageEvent(
+      "maximum-cost",
+      "2026-07-29T10:00:00.000Z",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    )
+
+    expect(yield* store.ingest([maximum])).toBe(1)
+    expect(
+      yield* Effect.result(
+        store.ingest([
+          usageEvent("overflow-cost", "2026-07-29T10:01:00.000Z", 10, 1),
+          usageEvent("second-model", "2026-07-29T10:01:00.000Z", 10),
+        ]),
+      ),
+    ).toMatchObject({
+      _tag: "Failure",
+      failure: {
+        reason: "usage cost aggregate exceeds safe integer bounds",
+      },
+    })
+
+    expect(yield* store.generation).toBe(1)
+    expect(yield* store.snapshot("2026-07-29T10:02:00.000Z")).toMatchObject({
+      costs: [{ estimatedCostNanoUsd: Number.MAX_SAFE_INTEGER, revision: 1 }],
+      snapshots: [{ revision: 1, tokens: { input: 1 } }],
+    })
+
+    expect(
+      yield* store.ingest([usageEvent("after-cost-rejection", "2026-07-29T10:03:00.000Z")]),
+    ).toBe(1)
+    expect(yield* store.generation).toBe(2)
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )
 

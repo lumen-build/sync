@@ -44,6 +44,8 @@ For automation, pass `--json` to receive one versioned JSON event per line.
 The resource/verb commands include `config init|path|show`, `harness
 list|status|configure|remove`, `collector run|status`, `sync daily`, `auth
 login|logout`, `service install|status|uninstall`, and `doctor`.
+Successful `harness configure` events report the verified post-write `state`
+and retain the pre-write value as `previousState`.
 
 The CLI checkpoints live aggregate state after each successful upload under
 the platform state directory, so cumulative revisions survive

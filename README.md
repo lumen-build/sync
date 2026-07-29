@@ -491,7 +491,11 @@ The service package renders and manages:
 - Linux systemd user services
 - Windows least-privilege Scheduled Tasks
 
-Service definitions contain the executable and config path, never an endpoint or credential. The collector reads configuration at startup.
+Service definitions contain the executable, any runtime prefix arguments, and
+the config path, never an endpoint or credential. Package installs preserve the
+Bun runtime by launching the CLI script through Bun. Setting
+`LUMEN_EXECUTABLE_PATH` selects a native executable instead. The collector reads
+configuration at startup.
 
 ## CLI automation protocol
 
@@ -502,6 +506,9 @@ lumen-sync --json harness status
 lumen-sync --json collector status
 lumen-sync --json doctor
 ```
+
+Successful `harness configure` events report the verified post-write `state`
+and retain the pre-write value as `previousState`.
 
 Each line contains `protocolVersion`, `sequence`, `timestamp`, `command`, and
 `type`. Successful records carry `data`; failures carry a stable `error`

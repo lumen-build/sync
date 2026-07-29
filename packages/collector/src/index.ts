@@ -1,6 +1,8 @@
 import type {
   OtelLiveBatch,
+  OtelUsageCostSnapshot,
   OtelUsageSnapshot,
+  UsageCostSnapshot,
   UsageSnapshot,
   UsageTokens,
 } from "@lumen-build/sync-contracts"
@@ -8,6 +10,7 @@ import {
   DeviceId,
   NonNegativeSafeInteger,
   OtelLiveBatch as OtelLiveBatchSchema,
+  OtelUsageCostSnapshot as OtelUsageCostSnapshotSchema,
   OtelUsageSnapshot as OtelUsageSnapshotSchema,
   UsageDay,
   UsageAgent as UsageAgentSchema,
@@ -39,6 +42,7 @@ export const UsageEvent = Schema.Struct({
   occurredAt: UtcTimestamp,
   provider: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
   sourceName: Schema.String,
+  sourceReportedCostNanoUsd: Schema.optionalKey(NonNegativeSafeInteger),
   sourceSignal: OtlpSignal,
   tokens: UsageTokensSchema,
 })
@@ -283,14 +287,23 @@ const tokensFor = (field: TokenField, value: number): UsageTokens => ({
   [field]: value,
 })
 
-interface UsageCandidate extends Omit<UsageEvent, "fingerprint"> {}
+interface UsageCandidate extends Omit<UsageEvent, "fingerprint"> {
+  readonly sourceIdentity?: string
+}
+
+const extractSourceReportedCostNanoUsd = (attributes: Attributes): number | undefined => {
+  const costUsd = attributes.number(["gen_ai.usage.cost"])
+  return costUsd === undefined ? undefined : Math.round(costUsd * 1_000_000_000)
+}
 
 const candidate = ({
   attributes,
   explicitAgent,
   identityHint,
   occurredAt,
+  sourceIdentity,
   sourceName,
+  sourceReportedCostNanoUsd,
   sourceSignal,
   tokens,
 }: {
@@ -298,7 +311,9 @@ const candidate = ({
   readonly explicitAgent?: UsageSnapshot["agent"]
   readonly identityHint: string
   readonly occurredAt: string
+  readonly sourceIdentity?: string
   readonly sourceName: string
+  readonly sourceReportedCostNanoUsd?: number
   readonly sourceSignal: OtlpSignal
   readonly tokens: UsageTokens
 }): UsageCandidate => {
@@ -322,7 +337,9 @@ const candidate = ({
     provider:
       attributes.string(["gen_ai.provider.name", "gen_ai.system", "provider"]) ??
       defaultProviderForAgent(agent),
+    ...(sourceIdentity === undefined ? {} : { sourceIdentity }),
     sourceName,
+    ...(sourceReportedCostNanoUsd === undefined ? {} : { sourceReportedCostNanoUsd }),
     sourceSignal,
     tokens,
   }
@@ -415,13 +432,23 @@ const mapTelemetry = (telemetry: DecodedTelemetry): ReadonlyArray<UsageCandidate
           return []
         }
         const tokens = extractTokens(attributes)
-        return tokensPresent(tokens)
+        const costNanoUsd = extractSourceReportedCostNanoUsd(attributes)
+        const nativeIdentity =
+          record.traceId === undefined && record.spanId === undefined
+            ? undefined
+            : `otel:${record.traceId ?? ""}:${record.spanId ?? ""}`
+        const explicitIdentity = attributes.string(["lumen.source.event_id"])
+        const sourceIdentity =
+          explicitIdentity === undefined ? nativeIdentity : `lumen:${explicitIdentity}`
+        return tokensPresent(tokens) || costNanoUsd !== undefined
           ? [
               candidate({
                 attributes,
                 identityHint: sourceName,
                 occurredAt: record.timestamp,
+                ...(sourceIdentity === undefined ? {} : { sourceIdentity }),
                 sourceName,
+                ...(costNanoUsd === undefined ? {} : { sourceReportedCostNanoUsd: costNanoUsd }),
                 sourceSignal: "logs",
                 tokens,
               }),
@@ -438,13 +465,15 @@ const mapTelemetry = (telemetry: DecodedTelemetry): ReadonlyArray<UsageCandidate
           return []
         }
         const tokens = extractTokens(attributes)
-        return tokensPresent(tokens)
+        const costNanoUsd = extractSourceReportedCostNanoUsd(attributes)
+        return tokensPresent(tokens) || costNanoUsd !== undefined
           ? [
               candidate({
                 attributes,
                 identityHint: span.name,
                 occurredAt: span.timestamp,
                 sourceName: "gen_ai.span",
+                ...(costNanoUsd === undefined ? {} : { sourceReportedCostNanoUsd: costNanoUsd }),
                 sourceSignal: "traces",
                 tokens,
               }),
@@ -483,7 +512,12 @@ const normalizerLayer = Layer.succeed(
   UsageNormalizer.of({
     normalize: Effect.fn("UsageNormalizer.normalize")((telemetry) =>
       Effect.forEach(mapTelemetry(telemetry), (current) =>
-        fingerprint(current).pipe(Effect.map((digest) => ({ ...current, fingerprint: digest }))),
+        fingerprint(current).pipe(
+          Effect.map((digest) => {
+            const { sourceIdentity: _, ...event } = current
+            return { ...event, fingerprint: digest }
+          }),
+        ),
       ),
     ),
   }),
@@ -499,9 +533,24 @@ const versionedSnapshot = ({ revision, snapshot }: Bucket): OtelUsageSnapshot =>
   revision,
 })
 
+interface CostBucket {
+  readonly revision: number
+  readonly snapshot: UsageCostSnapshot
+}
+
+const costSnapshotKey = (snapshot: Pick<UsageCostSnapshot, "agent" | "day">): string =>
+  [snapshot.day, snapshot.agent].join("\u0000")
+
+const versionedCostSnapshot = ({ revision, snapshot }: CostBucket): OtelUsageCostSnapshot => ({
+  ...snapshot,
+  revision,
+})
+
 interface StoreState {
   buckets: Map<string, Bucket>
   bucketsByDay: Map<string, Set<string>>
+  costBuckets: Map<string, CostBucket>
+  costBucketsByDay: Map<string, Set<string>>
   fingerprintOrder: Set<string>
   fingerprintsByDay: Map<string, Set<string>>
   generation: number
@@ -510,9 +559,11 @@ interface StoreState {
 }
 
 const isUsageEvent = Schema.is(UsageEvent)
+const isOtelUsageCostSnapshot = Schema.is(OtelUsageCostSnapshotSchema)
 const isOtelUsageSnapshot = Schema.is(OtelUsageSnapshotSchema)
 
 const StoreCheckpoint = Schema.Struct({
+  costs: Schema.optionalKey(Schema.Array(OtelUsageCostSnapshotSchema)),
   deviceId: DeviceId,
   generation: NonNegativeSafeInteger,
   latestDay: Schema.optionalKey(UsageDay),
@@ -526,6 +577,8 @@ type StoreCheckpoint = typeof StoreCheckpoint.Type
 const emptyStoreState = (): StoreState => ({
   buckets: new Map(),
   bucketsByDay: new Map(),
+  costBuckets: new Map(),
+  costBucketsByDay: new Map(),
   fingerprintOrder: new Set(),
   fingerprintsByDay: new Map(),
   generation: 0,
@@ -557,6 +610,17 @@ const stateFromCheckpoint = (
     const state = emptyStoreState()
     state.generation = checkpoint.generation
     if (checkpoint.latestDay !== undefined) state.latestDay = checkpoint.latestDay
+    for (const snapshot of checkpoint.costs ?? []) {
+      const { revision, ...cost } = snapshot
+      const key = costSnapshotKey(cost)
+      if (state.costBuckets.has(key)) {
+        return yield* new LiveUsageStoreError({
+          reason: "collector checkpoint contains duplicate usage cost snapshots",
+        })
+      }
+      state.costBuckets.set(key, { revision, snapshot: cost })
+      addToDayIndex(state.costBucketsByDay, cost.day, key)
+    }
     for (const snapshot of checkpoint.snapshots) {
       const { revision, ...usage } = snapshot
       const key = usageSnapshotKey(usage)
@@ -614,6 +678,9 @@ const loadStoreState = (
 }
 
 const checkpointFromState = (deviceId: string, state: StoreState): StoreCheckpoint => ({
+  costs: [...state.costBuckets.values()]
+    .map(versionedCostSnapshot)
+    .toSorted((left, right) => costSnapshotKey(left).localeCompare(costSnapshotKey(right))),
   deviceId,
   generation: state.generation,
   ...(state.latestDay === undefined ? {} : { latestDay: state.latestDay }),
@@ -669,6 +736,11 @@ const checkedAddUsageTokens = (left: UsageTokens, right: UsageTokens): UsageToke
   return values.every((value) => Number.isSafeInteger(value) && value >= 0) ? result : undefined
 }
 
+const checkedAddNonNegativeSafeIntegers = (left: number, right: number): number | undefined => {
+  const result = left + right
+  return Number.isSafeInteger(result) && result >= 0 ? result : undefined
+}
+
 const retentionCutoff = (latestDay: string, retentionDays: number): string => {
   const date = new Date(`${latestDay}T00:00:00.000Z`)
   date.setUTCDate(date.getUTCDate() - retentionDays + 1)
@@ -710,6 +782,33 @@ const expireDay = (state: StoreState, day: string): void => {
     for (const key of bucketKeys) state.buckets.delete(key)
     state.bucketsByDay.delete(day)
   }
+
+  const costBucketKeys = state.costBucketsByDay.get(day)
+  if (costBucketKeys !== undefined) {
+    for (const key of costBucketKeys) state.costBuckets.delete(key)
+    state.costBucketsByDay.delete(day)
+  }
+}
+
+const expiringBucketCount = (
+  state: StoreState,
+  nextLatestDay: string,
+  retentionDays: number,
+): number => {
+  if (state.latestDay === undefined) return 0
+  const currentCutoff = retentionCutoff(state.latestDay, retentionDays)
+  const nextCutoff = retentionCutoff(nextLatestDay, retentionDays)
+  const advance = daysBetween(currentCutoff, nextCutoff)
+  if (advance <= 0) return 0
+  if (advance >= retentionDays) return state.buckets.size
+
+  let count = 0
+  let day = currentCutoff
+  while (day < nextCutoff) {
+    count += state.bucketsByDay.get(day)?.size ?? 0
+    day = nextDay(day)
+  }
+  return count
 }
 
 const expireBefore = (state: StoreState, nextLatestDay: string, retentionDays: number): void => {
@@ -722,6 +821,8 @@ const expireBefore = (state: StoreState, nextLatestDay: string, retentionDays: n
   if (advance >= retentionDays) {
     state.buckets = new Map()
     state.bucketsByDay = new Map()
+    state.costBuckets = new Map()
+    state.costBucketsByDay = new Map()
     state.fingerprintOrder = new Set()
     state.fingerprintsByDay = new Map()
     state.seen = new Map()
@@ -804,6 +905,7 @@ const storeLayer = (
 
           const cutoff = retentionCutoff(latestDay, retentionDays)
           const pendingBuckets = new Map<string, Bucket>()
+          const pendingCostBuckets = new Map<string, CostBucket>()
           for (const { day, event } of accepted) {
             if (day < cutoff) continue
             const snapshot: UsageSnapshot = {
@@ -848,15 +950,67 @@ const storeLayer = (
               ]
             }
             pendingBuckets.set(key, bucket)
+
+            if (event.sourceReportedCostNanoUsd !== undefined) {
+              const costSnapshot: UsageCostSnapshot = {
+                agent: event.agent,
+                coverage: "source-reported",
+                day,
+                estimatedCostNanoUsd: event.sourceReportedCostNanoUsd,
+                unpricedEvents: 0,
+              }
+              const costKey = costSnapshotKey(costSnapshot)
+              const existingCost =
+                pendingCostBuckets.get(costKey) ?? current.costBuckets.get(costKey)
+              const estimatedCostNanoUsd = checkedAddNonNegativeSafeIntegers(
+                existingCost?.snapshot.estimatedCostNanoUsd ?? 0,
+                costSnapshot.estimatedCostNanoUsd,
+              )
+              const costRevision = (existingCost?.revision ?? 0) + 1
+              if (estimatedCostNanoUsd === undefined || !Number.isSafeInteger(costRevision)) {
+                return [
+                  {
+                    status: "failure",
+                    error: new LiveUsageStoreError({
+                      reason: "usage cost aggregate exceeds safe integer bounds",
+                    }),
+                  },
+                  current,
+                ]
+              }
+              const costBucket = {
+                revision: costRevision,
+                snapshot: {
+                  ...costSnapshot,
+                  estimatedCostNanoUsd,
+                },
+              }
+              if (
+                !isOtelUsageCostSnapshot({
+                  ...costBucket.snapshot,
+                  revision: costBucket.revision,
+                })
+              ) {
+                return [
+                  {
+                    status: "failure",
+                    error: new LiveUsageStoreError({
+                      reason: "invalid live usage cost snapshot",
+                    }),
+                  },
+                  current,
+                ]
+              }
+              pendingCostBuckets.set(costKey, costBucket)
+            }
           }
 
-          if (pendingBuckets.size === 0) {
+          if (pendingBuckets.size === 0 && pendingCostBuckets.size === 0) {
             return [{ status: "success", accepted: accepted.length }, current]
           }
 
-          const retainedBucketCount = [...current.buckets.values()].filter(
-            ({ snapshot }) => snapshot.day >= cutoff,
-          ).length
+          const retainedBucketCount =
+            current.buckets.size - expiringBucketCount(current, latestDay, retentionDays)
           const newBucketCount = [...pendingBuckets.keys()].filter(
             (key) => !current.buckets.has(key),
           ).length
@@ -894,6 +1048,13 @@ const storeLayer = (
             current.buckets.set(key, bucket)
           }
 
+          for (const [key, bucket] of pendingCostBuckets) {
+            if (!current.costBuckets.has(key)) {
+              addToDayIndex(current.costBucketsByDay, bucket.snapshot.day, key)
+            }
+            current.costBuckets.set(key, bucket)
+          }
+
           current.generation += 1
           current.latestDay = latestDay
           return [{ status: "success", accepted: accepted.length }, current]
@@ -906,7 +1067,9 @@ const storeLayer = (
       const snapshotInput = (capturedAt: string, current: StoreState) => ({
         source: "otel-live" as const,
         capturedAt,
-        costs: [],
+        costs: [...current.costBuckets.values()]
+          .map(versionedCostSnapshot)
+          .toSorted((left, right) => costSnapshotKey(left).localeCompare(costSnapshotKey(right))),
         deviceId,
         snapshots: [...current.buckets.values()]
           .map(versionedSnapshot)

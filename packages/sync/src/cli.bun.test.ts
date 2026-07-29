@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import { CliEvent } from "@lumen-build/sync-contracts"
-import { Schema } from "effect"
+import { makeServiceDefinition, type ServiceHost } from "@lumen-build/sync-service"
+import { Effect, Schema } from "effect"
 
 const cliPath = join(import.meta.dir, "cli.ts")
 
@@ -84,7 +85,8 @@ test("writes versioned JSONL for harness configure and remove", async () => {
         ],
         harness: "claude",
         path: join(home, ".claude", "settings.json"),
-        state: "missing",
+        previousState: "missing",
+        state: "exact",
       },
       protocolVersion: 1,
       sequence: 1,
@@ -120,6 +122,97 @@ test("writes versioned JSONL for harness configure and remove", async () => {
       type: "result",
     })
     expect(await Bun.file(join(dirname(configPath), "harness-ownership.json")).exists()).toBe(true)
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
+test("reports the verified post-write harness state in plain output", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-plain-"))
+  try {
+    const configPath = join(home, "config.toml")
+    await writeFile(
+      configPath,
+      ["[collector]", 'listen_url = "http://127.0.0.1:4318"', ""].join("\n"),
+    )
+    const result = await runCli(
+      ["--config", configPath, "harness", "configure", "--agent", "claude"],
+      {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
+      },
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe("claude: exact\n")
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
+test("service status uses Bun plus the absolute CLI script unless explicitly overridden", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-service-"))
+  try {
+    const configPath = join(home, "config.toml")
+    const configHome = join(home, ".config")
+    await writeFile(configPath, "")
+    const host: ServiceHost = {
+      ...(process.env.APPDATA === undefined ? {} : { appData: process.env.APPDATA }),
+      configHome,
+      home,
+      platform:
+        process.platform === "win32" ? "win32" : process.platform === "darwin" ? "darwin" : "linux",
+      ...(process.getuid === undefined ? {} : { userId: process.getuid() }),
+    }
+    const bunDefinition = await Effect.runPromise(
+      makeServiceDefinition({
+        configPath,
+        executablePath: process.execPath,
+        host,
+        prefixArguments: [cliPath],
+      }),
+    )
+    expect(bunDefinition.artifact.contents).toContain(process.execPath)
+    expect(bunDefinition.artifact.contents).toContain(cliPath)
+    await mkdir(dirname(bunDefinition.artifact.path), { recursive: true })
+    await writeFile(bunDefinition.artifact.path, bunDefinition.artifact.contents)
+
+    const environment = {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: configHome,
+    }
+    const bunStatus = await runCli(
+      ["--config", configPath, "--json", "service", "status"],
+      environment,
+    )
+    expect(bunStatus.exitCode).toBe(0)
+    expect(parseEvents(bunStatus.stdout)[0]).toMatchObject({
+      command: "service.status",
+      data: { path: bunDefinition.artifact.path, status: "exact" },
+      type: "result",
+    })
+
+    const nativeExecutable = join(home, "bin", "lumen-sync")
+    const nativeDefinition = await Effect.runPromise(
+      makeServiceDefinition({
+        configPath,
+        executablePath: nativeExecutable,
+        host,
+      }),
+    )
+    await writeFile(nativeDefinition.artifact.path, nativeDefinition.artifact.contents)
+    const nativeStatus = await runCli(["--config", configPath, "--json", "service", "status"], {
+      ...environment,
+      LUMEN_EXECUTABLE_PATH: nativeExecutable,
+    })
+    expect(nativeStatus.exitCode).toBe(0)
+    expect(parseEvents(nativeStatus.stdout)[0]).toMatchObject({
+      command: "service.status",
+      data: { path: nativeDefinition.artifact.path, status: "exact" },
+      type: "result",
+    })
   } finally {
     await rm(home, { force: true, recursive: true })
   }

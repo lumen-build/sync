@@ -371,6 +371,11 @@ const harnessConfigureCommand = Command.make(
           harness,
           paths,
         })
+        const status = yield* inspectHarness({
+          collectorUrl: collector.listenUrl,
+          harness,
+          paths,
+        })
         yield* output(
           "harness.configure",
           "result",
@@ -378,9 +383,10 @@ const harnessConfigureCommand = Command.make(
             changed: result.changes.map((change) => change.path.join(".")),
             harness,
             path: paths.configurations[harness],
-            state: result.state,
+            previousState: result.state,
+            state: status.state,
           },
-          `${harness}: ${result.state}`,
+          `${harness}: ${status.state}`,
         )
       }
     }),
@@ -620,10 +626,14 @@ const authCommand = Command.make("auth").pipe(
 
 const serviceDefinition = Effect.fn("Cli.serviceDefinition")(function* () {
   const paths = yield* selectedRuntimePaths()
+  const executableOverride = environment.LUMEN_EXECUTABLE_PATH
   return yield* makeServiceDefinition({
     configPath: paths.configFile,
-    executablePath: resolve(environment.LUMEN_EXECUTABLE_PATH ?? process.argv[1] ?? "lumen-sync"),
+    executablePath: resolve(executableOverride ?? process.execPath),
     host: hostPaths(),
+    ...(executableOverride === undefined
+      ? { prefixArguments: [resolve(process.argv[1] ?? "lumen-sync")] }
+      : {}),
   })
 })
 
