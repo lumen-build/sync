@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "allowJs": false,
     "exactOptionalPropertyTypes": true,
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
@@ -11,16 +10,12 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true,
     "noUncheckedIndexedAccess": true,
-    "plugins": [
-      {
-        "name": "@effect/language-service"
-      }
-    ],
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2024",
-    "types": ["bun", "vitest/globals"],
+    "types": ["bun"],
     "verbatimModuleSyntax": true
   },
-  "exclude": ["dist", "examples", "node_modules"]
+  "exclude": [],
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

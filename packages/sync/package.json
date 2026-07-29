@@ -12,7 +12,7 @@
     "url": "git+https://github.com/lumen-build/sync.git"
   },
   "bin": {
-    "lumen-sync": "./dist/cli.js"
+    "lumen-sync": "dist/cli.js"
   },
   "files": [
     "dist",

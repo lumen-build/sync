@@ -20,6 +20,14 @@ The workspace pins Bun 1.3.4, Effect 4.0.0-beta.102, and ccusage 20.0.19.
 
 ## Install
 
+Install the library in an application:
+
+```sh
+bun add @lumen-build/sync
+```
+
+Or install the CLI globally:
+
 ```sh
 bun add --global @lumen-build/sync
 lumen-sync --help
@@ -30,6 +38,13 @@ The package can also be used as a library:
 ```ts
 import { Collector, Config, Harness, Reconciliation, Runtime } from "@lumen-build/sync"
 ```
+
+Start with the focused references when embedding or operating the toolkit:
+
+- [complete configuration and environment reference](./docs/configuration.md)
+- [library entry points and Effect recipes](./docs/library-api.md)
+- [runnable reference receiver](./examples/receiver)
+- [receiver conformance exchanges](./docs/destination-conformance.json)
 
 ## Configure
 
@@ -64,6 +79,9 @@ Linux data and state follow `XDG_DATA_HOME` and `XDG_STATE_HOME`; macOS uses
 path intentionally colocates credentials, identity, and state beside that
 configuration. CLI flags take precedence over `LUMEN_CONFIG`; endpoint and
 authentication environment variables override TOML values.
+
+The [configuration reference](./docs/configuration.md) lists every TOML key,
+environment variable, platform path, and precedence rule.
 
 This complete bearer example uses `https://usage.lumen.build` for illustration.
 It is not a package default or assumed service, and tests intercept it rather
@@ -154,14 +172,14 @@ lumen-sync harness remove
 
 Existing JSONC comments and unrelated settings are retained. Conflicting managed values require `--force`. Removal restores only values that still match what Lumen Sync wrote; user changes are preserved.
 
-| Harness            | Integration                        | Configuration                | Linux E2E evidence                                                                  |
-| ------------------ | ---------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------- |
-| Claude Code        | Native OTLP metrics                | `~/.claude/settings.json`    | Real CLI, mocked model API, non-zero live usage, and non-empty ccusage daily import |
-| Codex              | Native OTLP metrics                | `~/.codex/config.toml`       | Real CLI, mocked model API, non-zero live usage, and non-empty ccusage daily import |
-| GitHub Copilot CLI | Native OTLP, currently best effort | `~/.copilot/settings.json`   | Configuration and shaped telemetry tests only; no real-CLI E2E yet                  |
-| Gemini CLI         | Native OTLP collector              | `~/.gemini/settings.json`    | Real CLI, mocked model API, and non-empty daily import; live OTLP not observed      |
-| OpenCode           | Usage-only plugin plus ccusage     | XDG/APPDATA OpenCode config  | Real CLI, packed plugin live envelope, and non-empty daily import                   |
-| VS Code Copilot    | Native OTLP                        | VS Code user `settings.json` | Configuration and shaped telemetry tests only; no headless real-client E2E yet      |
+| Harness            | Integration                        | Configuration                | Linux E2E evidence                                                                        |
+| ------------------ | ---------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------- |
+| Claude Code        | Native OTLP metrics                | `~/.claude/settings.json`    | Real CLI; exact mocked input/output counts in native live and ccusage daily data          |
+| Codex              | Native OTLP metrics                | `~/.codex/config.toml`       | Real CLI; exact mocked input/output counts in native live and ccusage daily data          |
+| GitHub Copilot CLI | Native OTLP, currently best effort | `~/.copilot/settings.json`   | Configuration and shaped telemetry tests only; no real-CLI E2E yet                        |
+| Gemini CLI         | Native OTLP collector              | `~/.gemini/settings.json`    | Real CLI and exact mocked input/output counts in daily data; live OTLP not observed       |
+| OpenCode           | Usage-only plugin plus ccusage     | XDG/APPDATA OpenCode config  | Real CLI, packed plugin live envelope, and exact mocked input/output counts in daily data |
+| VS Code Copilot    | Native OTLP                        | VS Code user `settings.json` | Configuration and shaped telemetry tests only; no headless real-client E2E yet            |
 
 Content capture is disabled. Claude and Codex are configured to send token metrics, not prompt-bearing logs. Gemini traces and prompt logging are disabled. VS Code and Copilot content capture are disabled.
 
@@ -486,6 +504,12 @@ The machine-readable
 [receiver conformance examples](./docs/destination-conformance.json) contain
 the same four mocked exchanges.
 
+The [Effect-based reference receiver](./examples/receiver) implements those
+exchanges in memory. Its conformance test proves authorization, live revision
+replacement, daily replay/conflict behavior, and exact input/output token
+preservation. It is a teaching implementation; production receivers must
+replace its in-memory state with durable transactional storage.
+
 ## User services
 
 ```sh
@@ -547,9 +571,15 @@ bun install
 bun run check
 bun run build
 bun run package:check
+bun run example:check
 bun run test:e2e:product
 bun run test:e2e:harness
 ```
+
+`package:check` installs the generated tarball into an empty consumer and into
+an isolated copy of the reference receiver, then runs the receiver typecheck
+and conformance tests against the installed package. `example:check` reruns
+only that packed receiver proof.
 
 Fast tests cover official-shaped telemetry from all six harnesses, JSON and
 protobuf OTLP, deduplication/revisions, ccusage adapters, reconciliation
@@ -569,7 +599,9 @@ and Node 22.23.1 in a separate lockfile. Each case configures and re-inspects
 the harness through the installed CLI, sends a canary prompt to a strict local
 model mock, runs the real vendor binary, proves a non-empty daily ccusage
 import, and verifies that the destination never receives the prompt. Claude
-and Codex additionally prove non-zero native live usage; OpenCode proves a
+and Codex additionally prove that the exact mocked input/output token pairs
+`17/5` and `19/7` reach both native live and daily data. Gemini and OpenCode
+prove exact daily pairs `23/11` and `29/13`; OpenCode also proves a
 packed-plugin live envelope. Copilot CLI and VS Code remain outside the
 real-client matrix and are not described as real-client verified.
 
@@ -578,6 +610,10 @@ runtime version. It runs formatting, lint, TypeScript, Effect-specific
 diagnostics, deterministic tests, and the build. Dependent Linux jobs pack and
 install `@lumen-build/sync`, run the product E2E, and execute one isolated
 real-harness E2E job for each pinned CLI.
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development expectations,
+[SECURITY.md](./SECURITY.md) for private vulnerability reporting, and
+[docs/releasing.md](./docs/releasing.md) for the npm trusted-publishing process.
 
 ## License
 

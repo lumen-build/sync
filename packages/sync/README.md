@@ -2,6 +2,14 @@
 
 Effect-native agent usage collection and synchronization for Claude Code, Codex, GitHub Copilot CLI, Gemini CLI, OpenCode, and VS Code Copilot.
 
+Install the library locally:
+
+```sh
+bun add @lumen-build/sync
+```
+
+Or install the CLI globally:
+
 ```sh
 bun add --global @lumen-build/sync
 lumen-sync --help
@@ -49,12 +57,12 @@ remains inactive until `LUMEN_COLLECTOR_OTLP_ENDPOINT` or
 The Linux E2E matrix invokes the packed CLI and pinned real binaries against a
 strict local model mock:
 
-| Harness     | Verified evidence                                                               |
-| ----------- | ------------------------------------------------------------------------------- |
-| Claude Code | Real model call, non-zero native live usage, and non-empty ccusage daily import |
-| Codex       | Real model call, non-zero native live usage, and non-empty ccusage daily import |
-| Gemini CLI  | Real model call and non-empty daily import; native live OTLP was not observed   |
-| OpenCode    | Real model call, packed-plugin live envelope, and non-empty daily import        |
+| Harness     | Verified evidence                                                                        |
+| ----------- | ---------------------------------------------------------------------------------------- |
+| Claude Code | Exact mocked input/output counts in native live and ccusage daily data (`17/5`)          |
+| Codex       | Exact mocked input/output counts in native live and ccusage daily data (`19/7`)          |
+| Gemini CLI  | Exact mocked input/output counts in daily data (`23/11`); live OTLP was not observed     |
+| OpenCode    | Packed-plugin live envelope and exact mocked input/output counts in daily data (`29/13`) |
 
 OpenCode's first real plugin event currently has zero token fields. GitHub
 Copilot CLI and VS Code Copilot have configuration and official-shaped
@@ -129,5 +137,14 @@ See the [full destination protocol](https://github.com/lumen-build/sync#destinat
 for field types, complete request examples, receiver status guidance, and
 source-reconciliation rules. The repository also publishes
 [machine-readable mocked exchanges](https://github.com/lumen-build/sync/blob/main/docs/destination-conformance.json).
+An
+[Effect-based reference receiver](https://github.com/lumen-build/sync/tree/main/examples/receiver)
+implements and tests those exchanges, including exact input/output token
+preservation.
+
+For embedding, see the
+[configuration reference](https://github.com/lumen-build/sync/blob/main/docs/configuration.md)
+and
+[library API recipes](https://github.com/lumen-build/sync/blob/main/docs/library-api.md).
 
 MIT

@@ -41,6 +41,22 @@ const nativeLiveProof: Readonly<Record<HarnessAgentType, "envelope" | "none" | "
   opencode: "envelope",
 }
 
+const expectedUsage: Readonly<
+  Record<HarnessAgentType, { readonly input: number; readonly output: number }>
+> = {
+  claude: { input: 17, output: 5 },
+  codex: { input: 19, output: 7 },
+  gemini: { input: 23, output: 11 },
+  opencode: { input: 29, output: 13 },
+}
+
+const matchesExpectedUsage = (
+  agent: HarnessAgentType,
+  snapshot: { readonly tokens: { readonly input: number; readonly output: number } },
+): boolean =>
+  snapshot.tokens.input === expectedUsage[agent].input &&
+  snapshot.tokens.output === expectedUsage[agent].output
+
 const canaryFor = (agent: HarnessAgentType): string => `LUMEN_E2E_${agent.toUpperCase()}_CANARY`
 
 const configText = (collectorUrl: string, destinationUrl: string): string =>
@@ -72,30 +88,31 @@ const requireCliSuccess = Effect.fn("E2E.Harness.requireCliSuccess")(function* (
 })
 
 const responseFor = (agent: HarnessAgentType): unknown => {
+  const tokens = expectedUsage[agent]
   switch (agent) {
     case "claude":
       return {
         content: "deterministic Claude response",
         model: "claude-e2e-model",
-        usage: { input_tokens: 17, output_tokens: 5 },
+        usage: { input_tokens: tokens.input, output_tokens: tokens.output },
       }
     case "codex":
       return {
         content: "deterministic Codex response",
         model: "codex-e2e-model",
-        usage: { input_tokens: 19, output_tokens: 7 },
+        usage: { input_tokens: tokens.input, output_tokens: tokens.output },
       }
     case "gemini":
       return {
         content: "deterministic Gemini response",
         model: "gemini-e2e-model",
-        usage: { candidatesTokenCount: 11, promptTokenCount: 23 },
+        usage: { candidatesTokenCount: tokens.output, promptTokenCount: tokens.input },
       }
     case "opencode":
       return {
         content: "deterministic OpenCode response",
         model: "opencode-e2e-model",
-        usage: { input_tokens: 29, output_tokens: 13 },
+        usage: { input_tokens: tokens.input, output_tokens: tokens.output },
       }
   }
 }
@@ -357,8 +374,10 @@ const verifyDailyImport = Effect.fn("E2E.Harness.verifyDailyImport")(function* (
     })
   }
   const batches = yield* destination.dailyBatches
-  expect(batches.at(-1)?.snapshots.length).toBeGreaterThan(0)
-  expect(batches.at(-1)?.snapshots.every((snapshot) => snapshot.agent === agent)).toBe(true)
+  const batch = batches.at(-1)
+  expect(batch?.snapshots.length).toBeGreaterThan(0)
+  expect(batch?.snapshots.every((snapshot) => snapshot.agent === agent)).toBe(true)
+  expect(batch?.snapshots.some((snapshot) => matchesExpectedUsage(agent, snapshot))).toBe(true)
 })
 
 const verifyHarness = Effect.fn("E2E.Harness.verify")(function* (
@@ -428,16 +447,7 @@ const verifyHarness = Effect.fn("E2E.Harness.verify")(function* (
     expect(live.snapshots.length).toBeGreaterThan(0)
     expect(live.snapshots.every((snapshot) => snapshot.agent === agent)).toBe(true)
     if (nativeLiveProof[agent] === "tokens") {
-      expect(
-        live.snapshots.some(
-          (snapshot) =>
-            snapshot.tokens.input > 0 ||
-            snapshot.tokens.output > 0 ||
-            snapshot.tokens.cacheCreationInput > 0 ||
-            snapshot.tokens.cacheReadInput > 0 ||
-            snapshot.tokens.reasoningOutput > 0,
-        ),
-      ).toBe(true)
+      expect(live.snapshots.some((snapshot) => matchesExpectedUsage(agent, snapshot))).toBe(true)
     }
   }
 
