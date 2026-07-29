@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
 import { CliEvent } from "@lumen-build/sync-contracts"
-import { Effect, Fiber, Queue, Schema } from "effect"
+import { Effect, Fiber, Option, Queue, Schema } from "effect"
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..")
 
@@ -12,7 +12,7 @@ export class PackedCliError extends Schema.TaggedErrorClass<PackedCliError>()("P
   reason: Schema.String,
 }) {}
 
-const definedEnvironment = (
+export const definedEnvironment = (
   environment: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> =>
   Object.fromEntries(
@@ -123,6 +123,84 @@ export interface PackedCli {
   readonly writeExecutable: (path: string, contents: string) => Effect.Effect<void, PackedCliError>
 }
 
+type CollectorEventType = Exclude<(typeof CliEvent.Type)["type"], "error">
+
+export const configArguments = (configPath: string, ...arguments_: ReadonlyArray<string>) => [
+  "--config",
+  configPath,
+  "--json",
+  ...arguments_,
+]
+
+export const nextCollectorEvent = (
+  collector: RunningCli,
+  type: CollectorEventType,
+): Effect.Effect<typeof CliEvent.Type, PackedCliError> =>
+  Effect.gen(function* () {
+    while (true) {
+      const event = yield* Effect.raceFirst(
+        Queue.take(collector.events),
+        collector.exitCode.pipe(
+          Effect.flatMap((exitCode) =>
+            collector.stdoutDone.pipe(
+              Effect.andThen(Queue.poll(collector.events)),
+              Effect.flatMap(
+                Option.match({
+                  onNone: () =>
+                    collector.stderr.pipe(
+                      Effect.flatMap((stderr) =>
+                        Effect.fail(
+                          new PackedCliError({
+                            operation: "wait for collector event",
+                            reason: `collector exited with code ${exitCode}: ${
+                              stderr.trim() || "no stderr"
+                            }`,
+                          }),
+                        ),
+                      ),
+                    ),
+                  onSome: Effect.succeed,
+                }),
+              ),
+            ),
+          ),
+        ),
+      )
+      if (event.type === "error") {
+        return yield* new PackedCliError({
+          operation: "wait for collector event",
+          reason: `collector emitted ${event.error.code}: ${event.error.message}`,
+        })
+      }
+      if (event.command === "collector.run" && event.type === type) return event
+    }
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: "20 seconds",
+      orElse: () =>
+        Effect.fail(
+          new PackedCliError({
+            operation: "wait for collector event",
+            reason: `timed out waiting for collector ${type} event`,
+          }),
+        ),
+    }),
+  )
+
+export const readyUrl = (event: typeof CliEvent.Type): string => {
+  if (!("data" in event)) throw new Error(`collector emitted ${event.error.code} before ready`)
+  const url = event.data?.url
+  if (typeof url !== "string") throw new Error("collector ready event omitted its URL")
+  return url
+}
+
+export const startCollector = (
+  cli: PackedCli,
+  configPath: string,
+  environment: Readonly<Record<string, string | undefined>>,
+) =>
+  cli.start(configArguments(configPath, "collector", "run", "--upload-interval", "1"), environment)
+
 const parseEvents = Effect.fn("E2E.PackedCli.parseEvents")(function* (stdout: string) {
   return yield* Effect.forEach(
     stdout
@@ -148,6 +226,7 @@ const streamEvents = (
     try: async () => {
       const reader = stream.getReader()
       const decoder = new TextDecoder()
+      let buffered = ""
       const offerLine = async (line: string) => {
         if (line.trim().length === 0) return
         const event = await Effect.runPromise(
@@ -161,21 +240,21 @@ const streamEvents = (
         )
         await Effect.runPromise(Queue.offer(events, event))
       }
-      const pump = async (buffered: string): Promise<void> => {
+
+      while (true) {
+        // CLI output is an ordered stream, so reads and event offers must remain sequential.
+        // eslint-disable-next-line no-await-in-loop
         const result = await reader.read()
         if (result.done) {
+          // eslint-disable-next-line no-await-in-loop
           await offerLine(`${buffered}${decoder.decode()}`)
-          return
+          break
         }
         const lines = `${buffered}${decoder.decode(result.value, { stream: true })}`.split("\n")
-        const remainder = lines.pop() ?? ""
-        await lines.reduce(
-          (previous, line) => previous.then(() => offerLine(line)),
-          Promise.resolve(),
-        )
-        await pump(remainder)
+        buffered = lines.pop() ?? ""
+        // eslint-disable-next-line no-await-in-loop
+        for (const line of lines) await offerLine(line)
       }
-      await pump("")
     },
     catch: (cause) => commandError("read CLI JSONL", cause),
   })

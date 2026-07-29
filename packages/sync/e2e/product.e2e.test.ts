@@ -1,77 +1,20 @@
 import { readFile, readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 
-import type { CliEvent } from "@lumen-build/sync-contracts"
 import { expect, it } from "bun:test"
-import { Effect, Option, Queue } from "effect"
+import { Effect } from "effect"
 
 import { logFixture } from "./support/fixtures.js"
 import { mockDestination } from "./support/mock-destination.js"
 import { mockOidc, type MockOidc } from "./support/mock-oidc.js"
 import {
+  configArguments,
   isolatedEnvironment,
+  nextCollectorEvent,
   packedCli,
-  type PackedCli,
-  type RunningCli,
+  readyUrl,
+  startCollector,
 } from "./support/packed-cli.js"
-
-const configArguments = (configPath: string, ...arguments_: ReadonlyArray<string>) => [
-  "--config",
-  configPath,
-  "--json",
-  ...arguments_,
-]
-
-const nextCollectorEvent = (collector: RunningCli, type: string) =>
-  Effect.gen(function* () {
-    while (true) {
-      const event = yield* Effect.raceFirst(
-        Queue.take(collector.events),
-        collector.exitCode.pipe(
-          Effect.flatMap((exitCode) =>
-            collector.stdoutDone.pipe(
-              Effect.andThen(Queue.poll(collector.events)),
-              Effect.flatMap(
-                Option.match({
-                  onNone: () =>
-                    collector.stderr.pipe(
-                      Effect.flatMap((stderr) =>
-                        Effect.fail(
-                          new Error(
-                            `collector exited with code ${exitCode}: ${
-                              stderr.trim() || "no stderr"
-                            }`,
-                          ),
-                        ),
-                      ),
-                    ),
-                  onSome: Effect.succeed,
-                }),
-              ),
-            ),
-          ),
-        ),
-      )
-      if (event.type === "error") {
-        return yield* Effect.fail(
-          new Error(`collector emitted ${event.error.code}: ${event.error.message}`),
-        )
-      }
-      if (event.command === "collector.run" && event.type === type) return event
-    }
-  }).pipe(
-    Effect.timeoutOrElse({
-      duration: "15 seconds",
-      orElse: () => Effect.fail(new Error(`timed out waiting for collector ${type} event`)),
-    }),
-  )
-
-const startCollector = (
-  cli: PackedCli,
-  configPath: string,
-  environment: Readonly<Record<string, string | undefined>>,
-) =>
-  cli.start(configArguments(configPath, "collector", "run", "--upload-interval", "1"), environment)
 
 const submitLog = (url: string, fixture: unknown) =>
   Effect.tryPromise({
@@ -144,13 +87,6 @@ const unusedLoopbackPort = Effect.acquireUseRelease(
   (server) => Effect.succeed(server.port),
   (server) => Effect.sync(() => server.stop(true)),
 )
-
-const readyUrl = (event: CliEvent): string => {
-  if (!("data" in event)) throw new Error(`collector emitted ${event.error.code} before ready`)
-  const url = event.data?.url
-  if (typeof url !== "string") throw new Error("collector ready event omitted its URL")
-  return url
-}
 
 it("runs the packed CLI without inventing a default endpoint", async () => {
   await Effect.runPromise(

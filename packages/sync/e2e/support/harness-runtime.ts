@@ -3,10 +3,9 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
-import type { CliEvent } from "@lumen-build/sync-contracts"
-import { Duration, Effect, Option, Queue, Schema } from "effect"
+import { Duration, Effect, Schema } from "effect"
 
-import type { PackedCli, RunningCli } from "./packed-cli.js"
+import { definedEnvironment, type PackedCli } from "./packed-cli.js"
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..")
 const fixtureDirectory = join(repositoryRoot, "packages", "sync", "e2e", "fixtures", "harness")
@@ -24,15 +23,6 @@ const failure = (operation: string, cause: unknown): HarnessE2eError =>
     operation,
     reason: cause instanceof Error ? cause.message : String(cause),
   })
-
-const definedEnvironment = (
-  environment: Readonly<Record<string, string | undefined>>,
-): Record<string, string> =>
-  Object.fromEntries(
-    Object.entries(environment).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  )
 
 export interface ExternalCommandResult {
   readonly exitCode: number
@@ -121,15 +111,15 @@ export interface HarnessDependencies {
 export const harnessDependencies = Effect.acquireRelease(
   Effect.gen(function* () {
     const provided = process.env.LUMEN_HARNESS_FIXTURE_NODE_MODULES
-    const root =
-      provided === undefined
-        ? yield* Effect.tryPromise({
-            try: () => mkdtemp(join(tmpdir(), "lumen-harness-dependencies-")),
-            catch: (cause) => failure("create harness dependency workspace", cause),
-          })
-        : resolve(provided, "..")
+    const owned = provided === undefined
+    const root = owned
+      ? yield* Effect.tryPromise({
+          try: () => mkdtemp(join(tmpdir(), "lumen-harness-dependencies-")),
+          catch: (cause) => failure("create harness dependency workspace", cause),
+        })
+      : resolve(provided, "..")
 
-    if (provided === undefined) {
+    if (owned) {
       yield* Effect.tryPromise({
         try: async () => {
           await copyFile(join(fixtureDirectory, "package.json"), join(root, "package.json"))
@@ -147,24 +137,29 @@ export const harnessDependencies = Effect.acquireRelease(
       })
     }
 
-    const nodeModules = provided === undefined ? join(root, "node_modules") : resolve(provided)
+    const nodeModules = owned ? join(root, "node_modules") : resolve(provided)
     return {
-      binDirectory: join(nodeModules, ".bin"),
-      executable: {
-        claude: join(nodeModules, ".bin", "claude"),
-        codex: join(nodeModules, ".bin", "codex"),
-        gemini: join(nodeModules, ".bin", "gemini"),
-        opencode: join(nodeModules, ".bin", "opencode"),
-      },
-      node: join(nodeModules, "node", "bin", "node"),
-      root,
-    } satisfies HarnessDependencies
+      owned,
+      public: {
+        binDirectory: join(nodeModules, ".bin"),
+        executable: {
+          claude: join(nodeModules, ".bin", "claude"),
+          codex: join(nodeModules, ".bin", "codex"),
+          gemini: join(nodeModules, ".bin", "gemini"),
+          opencode: join(nodeModules, ".bin", "opencode"),
+        },
+        node: join(nodeModules, "node", "bin", "node"),
+        root,
+      } satisfies HarnessDependencies,
+    }
   }),
-  ({ root }) =>
-    process.env.LUMEN_HARNESS_FIXTURE_NODE_MODULES === undefined
-      ? Effect.tryPromise(() => rm(root, { force: true, recursive: true })).pipe(Effect.ignore)
+  ({ owned, public: dependencies }) =>
+    owned
+      ? Effect.tryPromise(() => rm(dependencies.root, { force: true, recursive: true })).pipe(
+          Effect.ignore,
+        )
       : Effect.void,
-)
+).pipe(Effect.map(({ public: value }) => value))
 
 interface AimockJournalEntry {
   readonly body: unknown
@@ -250,79 +245,6 @@ export const loopbackPort = Effect.acquireUseRelease(
       server.stop(true)
     }),
 )
-
-export const configArguments = (configPath: string, ...arguments_: ReadonlyArray<string>) => [
-  "--config",
-  configPath,
-  "--json",
-  ...arguments_,
-]
-
-export const nextCollectorEvent = (collector: RunningCli, type: string) =>
-  Effect.gen(function* () {
-    while (true) {
-      const event = yield* Effect.raceFirst(
-        Queue.take(collector.events),
-        collector.exitCode.pipe(
-          Effect.flatMap((exitCode) =>
-            collector.stdoutDone.pipe(
-              Effect.andThen(Queue.poll(collector.events)),
-              Effect.flatMap(
-                Option.match({
-                  onNone: () =>
-                    collector.stderr.pipe(
-                      Effect.flatMap((stderr) =>
-                        Effect.fail(
-                          new HarnessE2eError({
-                            operation: "wait for collector event",
-                            reason: `collector exited with code ${exitCode}: ${
-                              stderr.trim() || "no stderr"
-                            }`,
-                          }),
-                        ),
-                      ),
-                    ),
-                  onSome: Effect.succeed,
-                }),
-              ),
-            ),
-          ),
-        ),
-      )
-      if (event.type === "error") {
-        return yield* new HarnessE2eError({
-          operation: "wait for collector event",
-          reason: `collector emitted ${event.error.code}: ${event.error.message}`,
-        })
-      }
-      if (event.command === "collector.run" && event.type === type) return event
-    }
-  }).pipe(
-    Effect.timeoutOrElse({
-      duration: "20 seconds",
-      orElse: () =>
-        Effect.fail(
-          new HarnessE2eError({
-            operation: "wait for collector event",
-            reason: `timed out waiting for collector ${type} event`,
-          }),
-        ),
-    }),
-  )
-
-export const readyUrl = (event: CliEvent): string => {
-  if (!("data" in event)) throw new Error(`collector emitted ${event.error.code} before ready`)
-  const url = event.data?.url
-  if (typeof url !== "string") throw new Error("collector ready event omitted its URL")
-  return url
-}
-
-export const startCollector = (
-  cli: PackedCli,
-  configPath: string,
-  environment: Readonly<Record<string, string | undefined>>,
-) =>
-  cli.start(configArguments(configPath, "collector", "run", "--upload-interval", "1"), environment)
 
 export const readJsonFile = <A = unknown>(path: string): Effect.Effect<A, HarnessE2eError> =>
   Effect.tryPromise({

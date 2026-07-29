@@ -11,7 +11,6 @@ export interface MockOidc {
   readonly issuer: string
   readonly refreshToken: string
   readonly revocations: ReadonlyArray<string>
-  readonly shutdown: Effect.Effect<void, MockOidcError>
 }
 
 const oidcError = (operation: string, cause: unknown): MockOidcError =>
@@ -58,15 +57,17 @@ export const mockOidc = Effect.acquireRelease(
       })
     }
     return {
-      assertion,
-      issuer,
-      refreshToken,
-      revocations,
+      public: {
+        assertion,
+        issuer,
+        refreshToken,
+        revocations,
+      } satisfies MockOidc,
       shutdown: Effect.tryPromise({
         try: () => server.stop(),
         catch: (cause) => oidcError("stop mock OIDC server", cause),
       }),
-    } satisfies MockOidc
+    }
   }),
   ({ shutdown }) => shutdown.pipe(Effect.ignore),
-)
+).pipe(Effect.map(({ public: value }) => value))

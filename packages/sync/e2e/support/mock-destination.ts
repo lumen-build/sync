@@ -8,7 +8,7 @@ import {
   OtelLiveBatch as OtelLiveBatchSchema,
   usageSnapshotKey,
 } from "@lumen-build/sync-contracts"
-import { Effect, Option, Queue, Ref, Schema, Stream } from "effect"
+import { Effect, Queue, Ref, Schema } from "effect"
 
 export class MockDestinationError extends Schema.TaggedErrorClass<MockDestinationError>()(
   "MockDestinationError",
@@ -34,14 +34,9 @@ export interface MockDestination {
   readonly requests: Effect.Effect<ReadonlyArray<CapturedRequest>>
   readonly takeLive: Effect.Effect<OtelLiveBatch, MockDestinationError>
   readonly url: string
-  readonly shutdown: Effect.Effect<void>
 }
 
-const jsonResponse = (body: unknown, status = 200): Response =>
-  Response.json(body, {
-    headers: { "content-type": "application/json" },
-    status,
-  })
+const jsonResponse = (body: unknown, status = 200): Response => Response.json(body, { status })
 
 export const mockDestination = Effect.acquireRelease(
   Effect.gen(function* () {
@@ -156,30 +151,24 @@ export const mockDestination = Effect.acquireRelease(
     })
 
     return {
-      canonicalSnapshots: Ref.get(canonical).pipe(Effect.map((values) => [...values.values()])),
-      dailyBatches: Ref.get(dailyBatches),
-      failNextDailyCommit: (count = 1) => Ref.set(failDailyCommit, count),
-      failNextLive: (count = 1) => Ref.set(failLive, count),
-      liveBatches: Ref.get(batches),
-      requests: Ref.get(requests),
-      takeLive: Stream.fromQueue(accepted).pipe(
-        Stream.runHead,
-        Effect.flatMap(
-          Option.match({
-            onNone: () =>
-              Effect.fail(new MockDestinationError({ reason: "destination queue ended" })),
-            onSome: Effect.succeed,
+      public: {
+        canonicalSnapshots: Ref.get(canonical).pipe(Effect.map((values) => [...values.values()])),
+        dailyBatches: Ref.get(dailyBatches),
+        failNextDailyCommit: (count = 1) => Ref.set(failDailyCommit, count),
+        failNextLive: (count = 1) => Ref.set(failLive, count),
+        liveBatches: Ref.get(batches),
+        requests: Ref.get(requests),
+        takeLive: Queue.take(accepted).pipe(
+          Effect.timeoutOrElse({
+            duration: "15 seconds",
+            orElse: () =>
+              Effect.fail(new MockDestinationError({ reason: "timed out waiting for live batch" })),
           }),
         ),
-        Effect.timeoutOrElse({
-          duration: "15 seconds",
-          orElse: () =>
-            Effect.fail(new MockDestinationError({ reason: "timed out waiting for live batch" })),
-        }),
-      ),
-      url: `http://${server.hostname}:${server.port}`,
+        url: `http://${server.hostname}:${server.port}`,
+      } satisfies MockDestination,
       shutdown: Effect.sync(() => server.stop(true)),
-    } satisfies MockDestination
+    }
   }),
   ({ shutdown }) => shutdown,
-)
+).pipe(Effect.map(({ public: value }) => value))

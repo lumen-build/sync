@@ -6,22 +6,27 @@ import { Effect, Schema } from "effect"
 
 import {
   aimock,
-  configArguments,
   HarnessAgent,
   type HarnessAgent as HarnessAgentType,
   type HarnessDependencies,
+  type ExternalCommandResult,
   harnessDependencies,
   HarnessE2eError,
   linkPackedOpenCodePlugin,
   loopbackPort,
-  nextCollectorEvent,
   readJsonFile,
-  readyUrl,
   runExternal,
-  startCollector,
 } from "./support/harness-runtime.js"
 import { mockDestination, type MockDestination } from "./support/mock-destination.js"
-import { isolatedEnvironment, packedCli, type PackedCli } from "./support/packed-cli.js"
+import {
+  configArguments,
+  isolatedEnvironment,
+  nextCollectorEvent,
+  packedCli,
+  readyUrl,
+  startCollector,
+  type PackedCli,
+} from "./support/packed-cli.js"
 
 const versions: Readonly<Record<HarnessAgentType, string>> = {
   claude: "2.1.220",
@@ -52,14 +57,7 @@ const configText = (collectorUrl: string, destinationUrl: string): string =>
     "",
   ].join("\n")
 
-const commandFailure = (
-  operation: string,
-  result: {
-    readonly exitCode: number
-    readonly stderr: string
-    readonly stdout: string
-  },
-) =>
+const commandFailure = (operation: string, result: ExternalCommandResult) =>
   new HarnessE2eError({
     operation,
     reason:
@@ -68,11 +66,7 @@ const commandFailure = (
 
 const requireCliSuccess = Effect.fn("E2E.Harness.requireCliSuccess")(function* (
   operation: string,
-  result: {
-    readonly exitCode: number
-    readonly stderr: string
-    readonly stdout: string
-  },
+  result: ExternalCommandResult,
 ) {
   if (result.exitCode !== 0) return yield* commandFailure(operation, result)
   return result
