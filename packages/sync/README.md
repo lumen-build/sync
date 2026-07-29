@@ -5,6 +5,7 @@ Effect-native agent usage collection and synchronization for Claude Code, Codex,
 ```sh
 bun add --global @lumen-build/sync
 lumen-sync --help
+lumen-sync config init --collector http://127.0.0.1:4318
 ```
 
 The package includes:
@@ -34,12 +35,18 @@ in this repository's tests, and not a package default.
 
 ```ts
 import { Collector, Config, Harness, Reconciliation, Runtime } from "@lumen-build/sync"
+import { CliEvent } from "@lumen-build/sync/contracts"
 ```
 
 OpenCode can load the usage-only plugin from `@lumen-build/sync/opencode`. It remains inactive until `LUMEN_COLLECTOR_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly set.
 
+For automation, pass `--json` to receive one versioned JSON event per line.
+The resource/verb commands include `config init|path|show`, `harness
+list|status|configure|remove`, `collector run|status`, `sync daily`, `auth
+login|logout`, `service install|status|uninstall`, and `doctor`.
+
 The CLI checkpoints live aggregate state after each successful upload under
-the platform configuration directory, so cumulative revisions survive
+the platform state directory, so cumulative revisions survive
 collector restarts. Daily ccusage import remains the recovery source for events
 received after the latest checkpoint.
 

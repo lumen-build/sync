@@ -12,7 +12,7 @@ agent harnesses ──OTLP──▶ local collector ──live, revisioned──
 
 ## Requirements
 
-- Bun 1.3.4 or newer
+- Bun 1.3.4 or newer (the workspace and CI pin exactly 1.3.4)
 - A receiver that implements the documented destination contract
 - One or more supported agent harnesses
 
@@ -33,11 +33,37 @@ import { Collector, Config, Harness, Reconciliation, Runtime } from "@lumen-buil
 
 ## Configure
 
+Create the configuration with an explicit loopback collector URL:
+
+```sh
+lumen-sync config init --collector http://127.0.0.1:4318
+```
+
+Add a destination and bearer authentication in the same atomic operation:
+
+```sh
+lumen-sync config init \
+  --collector http://127.0.0.1:4318 \
+  --destination https://usage.lumen.build \
+  --auth bearer
+```
+
+The `lumen.build` URL is illustrative and is intercepted in the test suite. It
+is never selected by the package. `config init` requires a collector URL and
+requires destination and authentication to be supplied together.
+
 The default configuration path follows the host platform:
 
-- macOS and Linux: `$XDG_CONFIG_HOME/lumen/config.toml` or `~/.config/lumen/config.toml`
-- Windows: `%APPDATA%\lumen\config.toml`
+- macOS and Linux: `$XDG_CONFIG_HOME/lumen-build/sync/config.toml` or `~/.config/lumen-build/sync/config.toml`
+- Windows: `%APPDATA%\lumen-build\sync\config.toml`
 - Any platform: set `LUMEN_CONFIG` or pass `--config`
+
+Linux data and state follow `XDG_DATA_HOME` and `XDG_STATE_HOME`; macOS uses
+`~/Library/Application Support/lumen-build/sync`; Windows uses
+`%LOCALAPPDATA%\lumen-build\sync`. An explicit `--config` or `LUMEN_CONFIG`
+path intentionally colocates credentials, identity, and state beside that
+configuration. CLI flags take precedence over `LUMEN_CONFIG`; endpoint and
+authentication environment variables override TOML values.
 
 This complete bearer example uses `https://usage.lumen.build` for illustration.
 It is not a package default or assumed service, and tests intercept it rather
@@ -52,16 +78,13 @@ base_url = "https://usage.lumen.build"
 
 [auth]
 mode = "bearer"
-
-[privacy]
-mode = "usage-only"
 ```
 
 Provide secrets through the environment:
 
 ```sh
 export LUMEN_BEARER_TOKEN="..."
-lumen-sync config check
+lumen-sync config show
 ```
 
 Endpoint environment overrides are also supported:
@@ -96,14 +119,35 @@ For local use:
 lumen-sync auth login
 ```
 
-Refresh tokens are stored in a mode-`0600` file beside the configuration. For CI, Lumen Sync accepts an explicit `LUMEN_OIDC_ASSERTION` and detects GitHub Actions OIDC, GitLab CI JWT, and CircleCI OIDC environments. OIDC discovery, refresh, revocation, JWKS validation, and introspection remain reusable library APIs.
+The equivalent initializer is:
+
+```sh
+lumen-sync config init \
+  --collector http://127.0.0.1:4318 \
+  --destination https://usage.lumen.build \
+  --auth oidc \
+  --oidc-issuer https://usage.lumen.build \
+  --oidc-client-id lumen-sync \
+  --oidc-audience https://usage.lumen.build \
+  --oidc-redirect-uri http://127.0.0.1:9876/callback \
+  --oidc-scope openid \
+  --oidc-scope offline_access
+```
+
+Refresh tokens are stored in a mode-`0600` file in the platform data directory,
+or beside an explicitly selected configuration. For CI, Lumen Sync accepts an
+explicit `LUMEN_OIDC_ASSERTION` and detects GitHub Actions OIDC, GitLab CI JWT,
+and CircleCI OIDC environments. OIDC discovery, refresh, revocation, JWKS
+validation, and introspection remain reusable library APIs.
 
 ## Configure agent harnesses
 
 ```sh
-lumen-sync harness setup
-lumen-sync harness setup --agent claude --agent codex
-lumen-sync harness setup --agent gemini --force
+lumen-sync harness list
+lumen-sync harness status
+lumen-sync harness configure
+lumen-sync harness configure --agent claude --agent codex
+lumen-sync harness configure --agent gemini --force
 lumen-sync harness remove
 ```
 
@@ -133,7 +177,7 @@ The harness settings follow the vendors’ observability surfaces: [Claude Code]
 ## Run live collection
 
 ```sh
-lumen-sync collector start
+lumen-sync collector run
 ```
 
 The listener must be an explicit HTTP loopback URL. OTLP/HTTP JSON and protobuf are supported at:
@@ -154,14 +198,14 @@ daily import is the recovery source for that window.
 For parsing tests or a receiver-less local experiment:
 
 ```sh
-lumen-sync collector start --local-only
+lumen-sync collector run --local-only
 ```
 
 ## Run daily sync
 
 ```sh
-lumen-sync sync --since 2026-07-01 --until 2026-07-29
-lumen-sync sync --agent claude --agent opencode
+lumen-sync sync daily --since 2026-07-01 --until 2026-07-29
+lumen-sync sync daily --agent claude --agent opencode
 ```
 
 Lumen Sync invokes the pinned ccusage 20.0.19 executable with JSON, offline mode, and UTC day boundaries. Claude, Codex, Copilot, Gemini, and OpenCode are supported.
@@ -404,7 +448,7 @@ caller retries the whole three-request operation, it must also reuse the same
 `syncId` and identical envelopes. A repeated commit must return a compatible
 2xx JSON response without applying the transaction twice.
 
-The CLI keeps a private journal under the platform configuration directory,
+The CLI keeps a private journal under the platform state directory,
 keyed by device, agent, and requested date range. A failed or interrupted
 `lumen-sync sync` invocation leaves the ID there, so a later invocation resumes
 the same transaction automatically. The journal entry is removed only after a
@@ -437,6 +481,7 @@ the same four mocked exchanges.
 
 ```sh
 lumen-sync service install
+lumen-sync service status
 lumen-sync service uninstall
 ```
 
@@ -447,6 +492,36 @@ The service package renders and manages:
 - Windows least-privilege Scheduled Tasks
 
 Service definitions contain the executable and config path, never an endpoint or credential. The collector reads configuration at startup.
+
+## CLI automation protocol
+
+Pass `--json` to emit newline-delimited, versioned events:
+
+```sh
+lumen-sync --json harness status
+lumen-sync --json collector status
+lumen-sync --json doctor
+```
+
+Each line contains `protocolVersion`, `sequence`, `timestamp`, `command`, and
+`type`. Successful records carry `data`; failures carry a stable `error`
+object with `code`, `message`, and `retryable`. A failed command writes its
+error event to stdout and exits nonzero. Human-readable output remains the
+default.
+
+The command surface is resource/verb based:
+
+- `config init|path|show`
+- `harness list|status|configure|remove`
+- `collector run|status`
+- `sync daily`
+- `auth login|logout`
+- `service install|status|uninstall`
+- `doctor`
+
+The library exports stable schemas from `@lumen-build/sync/contracts`, Bun
+adapters from `@lumen-build/sync/bun`, and the OpenCode integration from
+`@lumen-build/sync/opencode`.
 
 ## Development and proof
 
@@ -465,7 +540,11 @@ memory. The only real test listeners bind to loopback.
 
 [aimock, formerly llmock](https://aimock.copilotkit.dev/), is useful for downstream end-to-end tests that run a real agent against a deterministic model API. Lumen Sync itself never calls an inference API, so its CI mocks the boundaries it owns: OTLP, local usage reports, OAuth/OIDC, service controls, and the destination HTTP contract.
 
-CI runs on macOS, Linux, and Windows with Bun 1.3.4, then builds and installs the packed npm artifact before executing its CLI and importing its public API.
+CI runs on macOS, Linux, and Windows with Bun 1.3.4 and asserts that exact
+runtime version. It runs formatting, lint, TypeScript, Effect-specific
+diagnostics, deterministic tests, and the build. A dependent Linux job packs
+`@lumen-build/sync`, installs that tarball into an empty project, executes its
+CLI, and imports every public entry point.
 
 ## License
 
