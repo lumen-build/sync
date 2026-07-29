@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises"
+
+import { TomlDocument } from "@decimalturn/toml-patch"
 import { Effect, Schema } from "effect"
 
 const parseUrl = (value: string): URL | undefined => {
@@ -115,6 +118,14 @@ export class MissingConfiguration extends Schema.TaggedErrorClass<MissingConfigu
   "MissingConfiguration",
   {
     key: Schema.String,
+  },
+) {}
+
+export class ConfigurationFileError extends Schema.TaggedErrorClass<ConfigurationFileError>()(
+  "ConfigurationFileError",
+  {
+    path: Schema.String,
+    reason: Schema.String,
   },
 ) {}
 
@@ -322,3 +333,52 @@ export const resolveConfigPath = ({
   const root = environment.XDG_CONFIG_HOME ?? `${homeDirectory}/.config`
   return `${root}/lumen/config.toml`
 }
+
+export interface LoadConfigurationInput {
+  readonly environment: Readonly<Record<string, string | undefined>>
+  readonly path: string
+}
+
+export const parseToml = Effect.fn("Configuration.parseToml")(function* (
+  path: string,
+  contents: string,
+) {
+  return yield* Effect.try({
+    try: () => new TomlDocument(contents).toJsObject,
+    catch: (cause) =>
+      new ConfigurationFileError({
+        path,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+  })
+})
+
+export const load = Effect.fn("Configuration.load")(function* ({
+  environment,
+  path,
+}: LoadConfigurationInput) {
+  const contents = yield* Effect.tryPromise({
+    try: async () => {
+      try {
+        return await readFile(path, "utf8")
+      } catch (cause) {
+        if (
+          typeof cause === "object" &&
+          cause !== null &&
+          "code" in cause &&
+          cause.code === "ENOENT"
+        ) {
+          return undefined
+        }
+        throw cause
+      }
+    },
+    catch: (cause) =>
+      new ConfigurationFileError({
+        path,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+  })
+  const raw = contents === undefined ? {} : yield* parseToml(path, contents)
+  return yield* decodeWithEnvironment(raw, environment)
+})

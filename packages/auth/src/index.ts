@@ -29,6 +29,11 @@ export {
   oidcIntrospectionAuthenticatorLayer,
   oidcJwtAuthenticatorLayer,
 } from "./authenticator.js"
+export {
+  environmentAssertionLayer,
+  fileSecretStoreLayer,
+  localAuthorizationCodeReceiverLayer,
+} from "./adapters.js"
 export type {
   BearerAuthenticatorOptions,
   Interface as RequestAuthenticatorInterface,

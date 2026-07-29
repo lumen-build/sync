@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 import { Effect } from "effect"
 import { it } from "@effect/vitest"
 import { expect } from "vitest"
@@ -7,6 +11,7 @@ import {
   MissingConfiguration,
   decode,
   decodeWithEnvironment,
+  load,
   requireCollector,
   resolveConfigPath,
 } from "./index.js"
@@ -129,3 +134,34 @@ it("uses XDG on Unix and APPDATA on Windows", () => {
     }),
   ).toBe("C:\\Users\\dev\\AppData\\Roaming\\lumen\\config.toml")
 })
+
+it.effect("loads TOML while letting the environment override it", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-sync-config-"))),
+    (directory) =>
+      Effect.gen(function* () {
+        const path = join(directory, "config.toml")
+        yield* Effect.promise(() =>
+          writeFile(
+            path,
+            [
+              "[destination]",
+              'base_url = "https://old.lumen.build"',
+              "",
+              "[privacy]",
+              'mode = "usage-only"',
+              "",
+            ].join("\n"),
+          ),
+        )
+        const configuration = yield* load({
+          environment: {
+            LUMEN_DESTINATION_BASE_URL: "https://usage.lumen.build",
+          },
+          path,
+        })
+        expect(configuration.destination?.baseUrl).toBe("https://usage.lumen.build")
+      }),
+    (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
+  ),
+)
