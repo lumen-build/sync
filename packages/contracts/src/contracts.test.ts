@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   CcusageDailyBatch,
+  CliEvent,
   OtelLiveBatch,
   UsagePrincipal,
   UsageSnapshot,
@@ -73,5 +74,33 @@ describe("public usage contracts", () => {
     expect(addUsageTokens(emptyUsageTokens(), snapshot.tokens)).toEqual(snapshot.tokens)
     expect(usageSnapshotKey(snapshot)).toBe("2026-07-29\u0000codex\u0000openai\u0000gpt-5.6")
     expect(defaultProviderForAgent("vscode")).toBe("github")
+  })
+
+  it("validates versioned CLI events without accepting malformed errors", () => {
+    expect(
+      Schema.is(CliEvent)({
+        protocolVersion: 1,
+        sequence: 1,
+        timestamp: "2026-07-29T10:00:00.000Z",
+        command: "collector.run",
+        type: "ready",
+        data: { address: "http://127.0.0.1:4318" },
+      }),
+    ).toBe(true)
+
+    expect(
+      Schema.is(CliEvent)({
+        protocolVersion: 1,
+        sequence: 2,
+        timestamp: "2026-07-29T10:00:01.000Z",
+        command: "collector.run",
+        type: "error",
+        error: {
+          code: "",
+          message: "failed",
+          retryable: false,
+        },
+      }),
+    ).toBe(false)
   })
 })

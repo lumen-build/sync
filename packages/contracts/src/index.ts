@@ -178,6 +178,44 @@ export const ReconciliationPolicyName = Schema.Literals([
 
 export type ReconciliationPolicyName = typeof ReconciliationPolicyName.Type
 
+const CliEventCommon = Schema.Struct({
+  command: Schema.NonEmptyString.check(Schema.isMaxLength(128)),
+  protocolVersion: Schema.Literal(1),
+  sequence: PositiveSafeInteger,
+  timestamp: UtcTimestamp,
+})
+
+export const CliEventData = Schema.Record(Schema.String, Schema.Unknown)
+
+export interface CliEventData extends Schema.Schema.Type<typeof CliEventData> {}
+
+export const CliError = Schema.Struct({
+  code: Schema.NonEmptyString.check(Schema.isMaxLength(128)),
+  details: Schema.optionalKey(CliEventData),
+  message: Schema.NonEmptyString,
+  retryable: Schema.Boolean,
+}).annotate({ identifier: "CliError" })
+
+export interface CliError extends Schema.Schema.Type<typeof CliError> {}
+
+const CliOutputEvent = Schema.Struct({
+  ...CliEventCommon.fields,
+  data: CliEventData,
+  type: Schema.Literals(["ready", "progress", "result", "warning", "shutdown"]),
+})
+
+const CliErrorEvent = Schema.Struct({
+  ...CliEventCommon.fields,
+  error: CliError,
+  type: Schema.Literal("error"),
+})
+
+export const CliEvent = Schema.Union([CliOutputEvent, CliErrorEvent]).annotate({
+  identifier: "CliEvent",
+})
+
+export type CliEvent = typeof CliEvent.Type
+
 export const tokenTotal = (tokens: UsageTokens): number =>
   tokens.input +
   tokens.output +
