@@ -1,0 +1,16 @@
+{
+  "name": "@lumen-build/sync-otlp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.102",
+    "protobufjs": "8.7.1"
+  }
+}
