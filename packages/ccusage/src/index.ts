@@ -11,7 +11,8 @@ import {
   defaultProviderForAgent,
   usageSnapshotKey,
 } from "@lumen-build/sync-contracts"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Schema, Stream } from "effect"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 export const CCUSAGE_VERSION = "20.0.19"
 
@@ -135,13 +136,6 @@ export interface RunDailyInput {
 export interface CommandOutput {
   readonly stderr: string
   readonly stdout: string
-}
-
-export interface CcusageChildProcess {
-  readonly exited: Promise<number>
-  readonly kill: (signal?: NodeJS.Signals | number) => void
-  readonly stderr: ReadableStream<Uint8Array>
-  readonly stdout: ReadableStream<Uint8Array>
 }
 
 export interface CcusageImporterInterface {
@@ -341,25 +335,33 @@ export const buildArguments = ({ agent, since, until }: RunDailyInput): Readonly
 
 export const DEFAULT_CCUSAGE_TIMEOUT_MS = 60_000
 
+const collectText = (stream: Stream.Stream<Uint8Array, unknown>) =>
+  stream.pipe(
+    Stream.decodeText(),
+    Stream.runFold(
+      () => "",
+      (output, chunk) => output + chunk,
+    ),
+  )
+
 export interface CommandOptions {
   readonly executable?: string
   readonly prefixArguments?: ReadonlyArray<string>
-  readonly spawn?: (command: ReadonlyArray<string>) => CcusageChildProcess
   readonly timeoutMs?: number
 }
 
 export const makeCommand = ({
   executable = "ccusage",
   prefixArguments = [],
-  spawn = (command) =>
-    Bun.spawn([...command], {
-      stderr: "pipe",
-      stdout: "pipe",
-    }),
   timeoutMs = DEFAULT_CCUSAGE_TIMEOUT_MS,
-}: CommandOptions = {}) =>
-  Effect.succeed(
-    CcusageCommand.of({
+}: CommandOptions = {}): Effect.Effect<
+  CcusageCommand["Service"],
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> =>
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+    return CcusageCommand.of({
       runDaily: Effect.fn("CcusageCommand.runDaily")(function* (input) {
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
           return yield* new CcusageCommandFailed({
@@ -368,68 +370,65 @@ export const makeCommand = ({
           })
         }
 
-        const child = yield* Effect.try({
-          try: () => spawn([executable, ...prefixArguments, ...buildArguments(input)]),
-          catch: (cause) =>
-            new CcusageCommandFailed({
-              agent: input.agent,
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
-        const outcome = yield* Effect.tryPromise({
-          try: async () => {
-            const stdoutPromise = new Response(child.stdout).text()
-            const stderrPromise = new Response(child.stderr).text()
-            const completed = Promise.all([child.exited, stdoutPromise, stderrPromise]).then(
-              ([exitCode, commandStdout, commandStderr]) => ({
-                kind: "Completed" as const,
-                exitCode,
-                stderr: commandStderr,
-                stdout: commandStdout,
+        const outcome = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const child = yield* spawner.spawn(
+              ChildProcess.make(executable, [...prefixArguments, ...buildArguments(input)], {
+                stderr: "pipe",
+                stdout: "pipe",
               }),
             )
-            let timeoutId: ReturnType<typeof setTimeout> | undefined
-            const timedOut = new Promise<{ readonly kind: "TimedOut" }>((resolve) => {
-              timeoutId = setTimeout(() => resolve({ kind: "TimedOut" }), timeoutMs)
-            })
-
-            try {
-              const result = await Promise.race([completed, timedOut])
-              if (result.kind === "TimedOut") {
-                try {
-                  child.kill("SIGKILL")
-                } finally {
-                  await Promise.allSettled([child.exited, stdoutPromise, stderrPromise])
-                }
-              }
-              return result
-            } finally {
-              if (timeoutId !== undefined) clearTimeout(timeoutId)
-            }
-          },
-          catch: (cause) =>
-            new CcusageCommandFailed({
-              agent: input.agent,
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
-        if (outcome.kind === "TimedOut") {
-          return yield* new CcusageCommandFailed({
-            agent: input.agent,
-            reason: `ccusage timed out after ${timeoutMs}ms`,
-          })
-        }
+            return yield* Effect.all(
+              {
+                exitCode: child.exitCode,
+                stderr: collectText(child.stderr),
+                stdout: collectText(child.stdout),
+              },
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.millis(timeoutMs),
+                orElse: () =>
+                  Effect.fail(
+                    new CcusageCommandFailed({
+                      agent: input.agent,
+                      reason: `ccusage timed out after ${timeoutMs}ms`,
+                    }),
+                  ),
+              }),
+            )
+          }),
+        ).pipe(
+          Effect.mapError((cause) =>
+            cause instanceof CcusageCommandFailed
+              ? cause
+              : new CcusageCommandFailed({
+                  agent: input.agent,
+                  reason: cause instanceof Error ? cause.message : String(cause),
+                }),
+          ),
+        )
         if (outcome.exitCode !== 0) {
           return yield* new CcusageCommandFailed({
             agent: input.agent,
-            exitCode: outcome.exitCode,
+            exitCode: Number(outcome.exitCode),
             reason: outcome.stderr.trim() || `ccusage exited with code ${outcome.exitCode}`,
           })
         }
         return { stderr: outcome.stderr, stdout: outcome.stdout }
       }),
-    }),
-  )
+    })
+  })
 
 export const commandLayer = (options?: CommandOptions) =>
   Layer.effect(CcusageCommand, makeCommand(options))
+
+export const commandLayerTest = (
+  runDaily: CcusageCommandInterface["runDaily"],
+): Layer.Layer<CcusageCommand> =>
+  Layer.succeed(
+    CcusageCommand,
+    CcusageCommand.of({
+      runDaily: Effect.fn("CcusageCommand.Test.runDaily")(runDaily),
+    }),
+  )
