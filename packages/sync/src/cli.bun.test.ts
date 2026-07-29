@@ -59,6 +59,7 @@ test("writes versioned JSONL for harness configure and remove", async () => {
     const environment = {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
       XDG_CONFIG_HOME: configHome,
     }
 
@@ -140,6 +141,7 @@ test("reports the verified post-write harness state in plain output", async () =
       {
         ...process.env,
         HOME: home,
+        USERPROFILE: home,
         XDG_CONFIG_HOME: join(home, ".config"),
       },
     )
@@ -181,6 +183,7 @@ test("service status uses Bun plus the absolute CLI script unless explicitly ove
     const environment = {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
       XDG_CONFIG_HOME: configHome,
     }
     const bunStatus = await runCli(
@@ -224,6 +227,7 @@ test("reports a missing endpoint as a structured error without inventing a defau
     const result = await runCli(["--json", "collector", "status"], {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
       XDG_CONFIG_HOME: join(home, "config"),
     })
 
@@ -254,6 +258,7 @@ test("reports the command when an explicit config path has no TOML suffix", asyn
     const result = await runCli(["--config", configPath, "--json", "collector", "status"], {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
       XDG_CONFIG_HOME: join(home, "config"),
     })
 
