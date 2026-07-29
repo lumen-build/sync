@@ -64,22 +64,15 @@ const otlpHttp = (collectorUrl: string, signal: "logs" | "metrics" | "traces"): 
 const claudeSettings = (collectorUrl: string): ReadonlyArray<ManagedSetting> => {
   const environment: Readonly<Record<string, string>> = {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
-    CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
-    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: endpoint(collectorUrl, "logs"),
-    OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/protobuf",
     OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: endpoint(collectorUrl, "metrics"),
     OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: "http/protobuf",
     OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: "delta",
-    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: endpoint(collectorUrl, "traces"),
-    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "http/protobuf",
     OTEL_LOG_ASSISTANT_RESPONSES: "0",
     OTEL_LOG_RAW_API_BODIES: "0",
     OTEL_LOG_TOOL_CONTENT: "0",
     OTEL_LOG_TOOL_DETAILS: "0",
     OTEL_LOG_USER_PROMPTS: "0",
-    OTEL_LOGS_EXPORTER: "otlp",
     OTEL_METRICS_EXPORTER: "otlp",
-    OTEL_TRACES_EXPORTER: "otlp",
   }
   return Object.entries(environment).map(([name, value]) => ({
     path: ["env", name],
@@ -97,14 +90,9 @@ export const specifications = (
     case "codex":
       return [
         { path: ["otel", "log_user_prompt"], value: present(false) },
-        { path: ["otel", "exporter"], value: present(otlpHttp(collectorUrl, "logs")) },
         {
           path: ["otel", "metrics_exporter"],
           value: present(otlpHttp(collectorUrl, "metrics")),
-        },
-        {
-          path: ["otel", "trace_exporter"],
-          value: present(otlpHttp(collectorUrl, "traces")),
         },
       ]
     case "copilot":

@@ -1,6 +1,7 @@
-import { join, win32 } from "node:path"
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { dirname, join, win32 } from "node:path"
 
-import { Effect, Schema } from "effect"
+import { Context, Effect, Layer, Schema } from "effect"
 
 export type ServicePlatform = "darwin" | "linux" | "win32"
 
@@ -15,6 +16,21 @@ export interface ServiceCommand {
   readonly args: ReadonlyArray<string>
   readonly executable: string
 }
+
+export interface CommandResult {
+  readonly exitCode: number
+  readonly stderr: string
+  readonly stdout: string
+}
+
+export interface ServiceCommandRunnerInterface {
+  readonly run: (command: ServiceCommand) => Effect.Effect<CommandResult, ServiceLifecycleError>
+}
+
+export class ServiceCommandRunner extends Context.Service<
+  ServiceCommandRunner,
+  ServiceCommandRunnerInterface
+>()("@lumen-build/sync/ServiceCommandRunner") {}
 
 export interface ServiceDefinition {
   readonly artifact: {
@@ -40,6 +56,14 @@ export class InvalidServiceDefinition extends Schema.TaggedErrorClass<InvalidSer
   "InvalidServiceDefinition",
   {
     field: Schema.String,
+    reason: Schema.String,
+  },
+) {}
+
+export class ServiceLifecycleError extends Schema.TaggedErrorClass<ServiceLifecycleError>()(
+  "ServiceLifecycleError",
+  {
+    operation: Schema.String,
     reason: Schema.String,
   },
 ) {}
@@ -264,3 +288,116 @@ export const makeServiceDefinition = Effect.fn("ServiceDefinition.make")(functio
       return windowsDefinition(executable, config, host)
   }
 })
+
+const lifecycleError = (operation: string, cause: unknown): ServiceLifecycleError =>
+  new ServiceLifecycleError({
+    operation,
+    reason: cause instanceof Error ? cause.message : String(cause),
+  })
+
+const readArtifact = (path: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        return {
+          contents: await readFile(path, "utf8"),
+          mode: (await stat(path)).mode & 0o777,
+        }
+      } catch (cause) {
+        if (
+          typeof cause === "object" &&
+          cause !== null &&
+          "code" in cause &&
+          cause.code === "ENOENT"
+        ) {
+          return undefined
+        }
+        throw cause
+      }
+    },
+    catch: (cause) => lifecycleError("read service definition", cause),
+  })
+
+const writeArtifact = (path: string, contents: string, mode: number) =>
+  Effect.tryPromise({
+    try: async () => {
+      const temporary = `${path}.${crypto.randomUUID()}.tmp`
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+      try {
+        await writeFile(temporary, contents, { mode })
+        await rename(temporary, path)
+      } finally {
+        await rm(temporary, { force: true })
+      }
+    },
+    catch: (cause) => lifecycleError("write service definition", cause),
+  })
+
+const runCommands = Effect.fn("ServiceLifecycle.runCommands")(function* (
+  commands: ReadonlyArray<ServiceCommand>,
+) {
+  const runner = yield* ServiceCommandRunner
+  for (const command of commands) {
+    const result = yield* runner.run(command)
+    if (result.exitCode !== 0) {
+      return yield* new ServiceLifecycleError({
+        operation: `${command.executable} ${command.args.join(" ")}`,
+        reason: result.stderr.trim() || `exited with code ${result.exitCode}`,
+      })
+    }
+  }
+})
+
+export const installService = Effect.fn("ServiceLifecycle.install")(function* (
+  definition: ServiceDefinition,
+) {
+  const previous = yield* readArtifact(definition.artifact.path)
+  yield* writeArtifact(
+    definition.artifact.path,
+    definition.artifact.contents,
+    definition.artifact.mode,
+  )
+  yield* runCommands(definition.install).pipe(
+    Effect.catch((error) =>
+      (previous === undefined
+        ? Effect.tryPromise({
+            try: () => rm(definition.artifact.path, { force: true }),
+            catch: () => error,
+          })
+        : writeArtifact(definition.artifact.path, previous.contents, previous.mode)
+      ).pipe(Effect.andThen(Effect.fail(error))),
+    ),
+  )
+})
+
+export const uninstallService = Effect.fn("ServiceLifecycle.uninstall")(function* (
+  definition: ServiceDefinition,
+) {
+  yield* runCommands(definition.uninstall)
+  yield* Effect.tryPromise({
+    try: () => rm(definition.artifact.path, { force: true }),
+    catch: (cause) => lifecycleError("remove service definition", cause),
+  })
+})
+
+export const liveServiceCommandRunnerLayer: Layer.Layer<ServiceCommandRunner> = Layer.succeed(
+  ServiceCommandRunner,
+  ServiceCommandRunner.of({
+    run: Effect.fn("ServiceCommandRunner.live")(function* ({ args, executable }) {
+      const child = yield* Effect.try({
+        try: () => Bun.spawn([executable, ...args], { stderr: "pipe", stdout: "pipe" }),
+        catch: (cause) => lifecycleError(`start ${executable}`, cause),
+      })
+      const [exitCode, stderr, stdout] = yield* Effect.tryPromise({
+        try: () =>
+          Promise.all([
+            child.exited,
+            new Response(child.stderr).text(),
+            new Response(child.stdout).text(),
+          ]),
+        catch: (cause) => lifecycleError(`run ${executable}`, cause),
+      })
+      return { exitCode, stderr, stdout }
+    }),
+  }),
+)

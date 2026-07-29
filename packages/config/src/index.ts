@@ -34,6 +34,18 @@ export const NetworkUrl = Schema.NonEmptyString.check(
   }),
 )
 
+const CollectorListenUrl = Schema.NonEmptyString.check(
+  Schema.makeFilter(
+    (value) => {
+      const url = parseUrl(value)
+      return url !== undefined && url.protocol === "http:" && loopbackHosts.has(url.hostname)
+    },
+    {
+      message: "expected an HTTP loopback URL",
+    },
+  ),
+)
+
 const RedirectUrl = Schema.NonEmptyString.check(
   Schema.makeFilter(isLoopbackRedirect, {
     message: "expected an HTTPS or loopback redirect URL",
@@ -61,7 +73,7 @@ const RawConfiguration = Schema.Struct({
   auth: Schema.optionalKey(RawAuth),
   collector: Schema.optionalKey(
     Schema.Struct({
-      listen_url: NetworkUrl,
+      listen_url: CollectorListenUrl,
     }),
   ),
   destination: Schema.optionalKey(
@@ -186,6 +198,21 @@ const environmentUrl = (
         ),
       )
 
+const environmentCollectorUrl = (
+  value: string | undefined,
+): Effect.Effect<string | undefined, InvalidConfiguration> =>
+  value === undefined
+    ? Effect.succeed(undefined)
+    : Schema.decodeUnknownEffect(CollectorListenUrl)(value).pipe(
+        Effect.as(value),
+        Effect.mapError(
+          (error) =>
+            new InvalidConfiguration({
+              reason: `LUMEN_COLLECTOR_LISTEN_URL: ${error.message}`,
+            }),
+        ),
+      )
+
 const invalidEnvironment = (key: string, value: string): InvalidConfiguration =>
   new InvalidConfiguration({
     reason: `${key}: unsupported value ${JSON.stringify(value)}`,
@@ -196,10 +223,7 @@ export const decodeWithEnvironment = Effect.fn("Configuration.decodeWithEnvironm
   environment: Readonly<Record<string, string | undefined>>,
 ) {
   const base = yield* decode(input)
-  const collectorUrl = yield* environmentUrl(
-    environment.LUMEN_COLLECTOR_LISTEN_URL,
-    "LUMEN_COLLECTOR_LISTEN_URL",
-  )
+  const collectorUrl = yield* environmentCollectorUrl(environment.LUMEN_COLLECTOR_LISTEN_URL)
   const destinationUrl = yield* environmentUrl(
     environment.LUMEN_DESTINATION_BASE_URL,
     "LUMEN_DESTINATION_BASE_URL",

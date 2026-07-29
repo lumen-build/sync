@@ -1,0 +1,49 @@
+{
+  "name": "@lumen-build/sync",
+  "version": "0.1.0",
+  "description": "Effect-native agent usage collection and synchronization toolkit",
+  "license": "MIT",
+  "bin": {
+    "lumen-sync": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/types/packages/sync/src/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./opencode": {
+      "types": "./dist/types/packages/sync/src/opencode.d.ts",
+      "import": "./dist/opencode.js"
+    }
+  },
+  "scripts": {
+    "build": "bun run clean && bun build ./src/index.ts ./src/opencode.ts ./src/cli.ts --outdir ./dist --target bun --format esm --external effect --external @effect/platform-bun --external @decimalturn/toml-patch --external ccusage --external jsonc-parser --external protobufjs && tsc --project ./tsconfig.types.json --declaration --emitDeclarationOnly --outDir ./dist/types --rootDir ../.. && node ./scripts/rewrite-declarations.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{force:true,recursive:true})\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@decimalturn/toml-patch": "2.0.0",
+    "@effect/platform-bun": "4.0.0-beta.102",
+    "ccusage": "20.0.19",
+    "effect": "4.0.0-beta.102",
+    "jsonc-parser": "3.3.1",
+    "protobufjs": "8.7.1"
+  },
+  "devDependencies": {
+    "@lumen-build/sync-auth": "workspace:*",
+    "@lumen-build/sync-ccusage": "workspace:*",
+    "@lumen-build/sync-collector": "workspace:*",
+    "@lumen-build/sync-config": "workspace:*",
+    "@lumen-build/sync-contracts": "workspace:*",
+    "@lumen-build/sync-destination": "workspace:*",
+    "@lumen-build/sync-harness": "workspace:*",
+    "@lumen-build/sync-otlp": "workspace:*",
+    "@lumen-build/sync-reconciliation": "workspace:*",
+    "@lumen-build/sync-service": "workspace:*"
+  }
+}

@@ -1,7 +1,13 @@
 import { expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 
-import { InvalidServiceDefinition, makeServiceDefinition } from "./index"
+import {
+  InvalidServiceDefinition,
+  ServiceCommandRunner,
+  installService,
+  makeServiceDefinition,
+  uninstallService,
+} from "./index"
 
 it.effect("renders launchd without embedding a collector endpoint", () =>
   Effect.gen(function* () {
@@ -77,3 +83,53 @@ it.effect("rejects paths that can inject a service definition", () =>
     expect(error).toBeInstanceOf(InvalidServiceDefinition)
   }),
 )
+
+it.effect("installs and uninstalls only through the command-runner port", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(async () => {
+      return mkdtemp(join(tmpdir(), "lumen-sync-service-"))
+    }),
+    (home) => {
+      const calls: Array<string> = []
+      const runner = Layer.succeed(
+        ServiceCommandRunner,
+        ServiceCommandRunner.of({
+          run: (command) => {
+            calls.push(`${command.executable} ${command.args.join(" ")}`)
+            return Effect.succeed({ exitCode: 0, stderr: "", stdout: "" })
+          },
+        }),
+      )
+      return Effect.gen(function* () {
+        const definition = yield* makeServiceDefinition({
+          configPath: join(home, ".config", "lumen", "config.toml"),
+          executablePath: join(home, "bin", "lumen-sync"),
+          host: { home, platform: "linux" },
+        })
+        yield* installService(definition)
+        expect(yield* Effect.promise(() => access(definition.artifact.path).then(() => true))).toBe(
+          true,
+        )
+        yield* uninstallService(definition)
+        expect(
+          yield* Effect.promise(() =>
+            access(definition.artifact.path).then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false)
+        expect(calls).toEqual([
+          "systemctl --user daemon-reload",
+          "systemctl --user enable --now lumen-sync.service",
+          "systemctl --user disable --now lumen-sync.service",
+          "systemctl --user daemon-reload",
+        ])
+      }).pipe(Effect.provide(runner))
+    },
+    (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
+  ),
+)
+import { access, mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"

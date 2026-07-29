@@ -34,20 +34,73 @@ it("infers every primary harness identity", () => {
   ).toEqual(["claude", "codex", "copilot", "gemini", "opencode", "vscode"])
 })
 
-it.effect("normalizes generic usage without retaining prompts or responses", () =>
+it.effect("uses logs only for OpenCode and unknown emitters", () =>
   Effect.gen(function* () {
     const normalizer = yield* UsageNormalizer
-    for (const agent of ["claude", "copilot", "gemini", "opencode", "vscode"] as const) {
-      const events = yield* normalizer.normalize(attributes(`${agent}-mocked-agent`))
-      expect(events[0]).toMatchObject({
-        agent,
-        model: "mock-model",
-        occurredAt: timestamp,
-        tokens: { input: 12, output: 3 },
-      })
-      expect(JSON.stringify(events)).not.toContain("prompt")
-      expect(JSON.stringify(events)).not.toContain("response")
-    }
+    const events = yield* normalizer.normalize(attributes("opencode-mocked-agent"))
+    expect(events[0]).toMatchObject({
+      agent: "opencode",
+      model: "mock-model",
+      occurredAt: timestamp,
+      tokens: { input: 12, output: 3 },
+    })
+    expect(yield* normalizer.normalize(attributes("claude-mocked-agent"))).toEqual([])
+    expect(JSON.stringify(events)).not.toContain("prompt")
+    expect(JSON.stringify(events)).not.toContain("response")
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
+it.effect("normalizes the official token metrics from five native OTEL harnesses", () =>
+  Effect.gen(function* () {
+    const normalizer = yield* UsageNormalizer
+    const metric = (
+      serviceName: string,
+      name: string,
+      type: string,
+      dataKind: "histogram" | "sum" = "sum",
+    ): Extract<DecodedTelemetry, { readonly _tag: "Metrics" }>["metrics"][number] => ({
+      dataKind,
+      name,
+      points: [
+        {
+          attributes: {
+            [name === "codex.turn.token_usage"
+              ? "token_type"
+              : name === "gen_ai.client.token.usage"
+                ? "gen_ai.token.type"
+                : "type"]: type,
+          },
+          timestamp,
+          value: 7,
+        },
+      ],
+      resourceAttributes: {
+        "gen_ai.request.model": "mock-model",
+        "service.name": serviceName,
+      },
+      temporality: "delta",
+      unit: "{token}",
+    })
+    const events = yield* normalizer.normalize({
+      _tag: "Metrics",
+      metrics: [
+        metric("claude-code", "claude_code.token.usage", "input"),
+        metric("codex", "codex.turn.token_usage", "input", "histogram"),
+        metric("github-copilot", "gen_ai.client.token.usage", "input"),
+        metric("gemini-cli", "gemini_cli.token.usage", "thought"),
+        metric("vscode", "gen_ai.client.token.usage", "output"),
+      ],
+    })
+
+    expect(events.map((event) => event.agent)).toEqual([
+      "claude",
+      "codex",
+      "copilot",
+      "gemini",
+      "vscode",
+    ])
+    expect(events[3]?.tokens.reasoningOutput).toBe(7)
+    expect(events[4]?.tokens.output).toBe(7)
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )
 
@@ -55,7 +108,7 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
   Effect.gen(function* () {
     const normalizer = yield* UsageNormalizer
     const store = yield* LiveUsageStore
-    const events = yield* normalizer.normalize(attributes("claude-mocked-agent"))
+    const events = yield* normalizer.normalize(attributes("opencode-mocked-agent"))
 
     expect(yield* store.ingest(events)).toBe(1)
     expect(yield* store.ingest(events)).toBe(0)
@@ -63,10 +116,10 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
     expect(first.snapshots[0]?.revision).toBe(1)
 
     const later = yield* normalizer.normalize({
-      ...attributes("claude-mocked-agent"),
+      ...attributes("opencode-mocked-agent"),
       records: [
         {
-          ...attributes("claude-mocked-agent").records[0]!,
+          ...attributes("opencode-mocked-agent").records[0]!,
           timestamp: "2026-07-29T10:02:00.000Z",
         },
       ],
@@ -94,7 +147,7 @@ it.effect("accepts mocked JSON and protobuf OTLP requests", () =>
                 attributes: [
                   {
                     key: "service.name",
-                    value: { stringValue: "claude-mocked-agent" },
+                    value: { stringValue: "opencode-mocked-agent" },
                   },
                 ],
               },
@@ -105,7 +158,7 @@ it.effect("accepts mocked JSON and protobuf OTLP requests", () =>
                       attributes: [
                         {
                           key: "gen_ai.request.model",
-                          value: { stringValue: "claude-mock" },
+                          value: { stringValue: "opencode-mock" },
                         },
                         {
                           key: "gen_ai.usage.input_tokens",
@@ -182,6 +235,6 @@ it.effect("accepts mocked JSON and protobuf OTLP requests", () =>
 
     const snapshot: OtelLiveBatch = yield* store.snapshot("2026-07-29T10:05:00.000Z")
     expect(snapshot.snapshots).toHaveLength(2)
-    expect(snapshot.snapshots.map((item) => item.agent)).toEqual(["claude", "codex"])
+    expect(snapshot.snapshots.map((item) => item.agent)).toEqual(["codex", "opencode"])
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )

@@ -386,10 +386,8 @@ const mapTelemetry = (telemetry: DecodedTelemetry): ReadonlyArray<UsageCandidate
           record.eventName ??
           "gen_ai.log"
         ).toLowerCase()
-        if (
-          inferAgent(record.resourceAttributes, sourceName) === "codex" ||
-          record.timestamp === undefined
-        ) {
+        const agent = inferAgent(record.resourceAttributes, sourceName)
+        if ((agent !== "opencode" && agent !== "unknown") || record.timestamp === undefined) {
           return []
         }
         const tokens = extractTokens(attributes)
@@ -411,10 +409,8 @@ const mapTelemetry = (telemetry: DecodedTelemetry): ReadonlyArray<UsageCandidate
     case "Traces":
       return telemetry.spans.flatMap((span) => {
         const attributes = makeAttributes(span.resourceAttributes, span.attributes)
-        if (
-          inferAgent(span.resourceAttributes, span.name) === "codex" ||
-          span.timestamp === undefined
-        ) {
+        const agent = inferAgent(span.resourceAttributes, span.name)
+        if ((agent !== "opencode" && agent !== "unknown") || span.timestamp === undefined) {
           return []
         }
         const tokens = extractTokens(attributes)

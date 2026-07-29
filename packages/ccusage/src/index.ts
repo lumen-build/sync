@@ -368,15 +368,19 @@ export const buildArguments = ({ agent, since, until }: RunDailyInput): Readonly
 
 export interface CommandOptions {
   readonly executable?: string
+  readonly prefixArguments?: ReadonlyArray<string>
 }
 
-export const makeCommand = ({ executable = "ccusage" }: CommandOptions = {}) =>
+export const makeCommand = ({
+  executable = "ccusage",
+  prefixArguments = [],
+}: CommandOptions = {}) =>
   Effect.succeed(
     CcusageCommand.of({
       runDaily: Effect.fn("CcusageCommand.runDaily")(function* (input) {
         const child = yield* Effect.try({
           try: () =>
-            Bun.spawn([executable, ...buildArguments(input)], {
+            Bun.spawn([executable, ...prefixArguments, ...buildArguments(input)], {
               stderr: "pipe",
               stdout: "pipe",
             }),
