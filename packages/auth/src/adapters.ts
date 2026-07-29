@@ -304,7 +304,7 @@ const openBrowser = Effect.fn("AuthorizationCodeReceiver.openBrowser")(function*
         stdout: "ignore",
       }),
     )
-    yield* handle.unref
+    yield* handle.unref.pipe(Effect.asVoid)
   }).pipe(
     Effect.scoped,
     Effect.mapError(

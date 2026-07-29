@@ -11,6 +11,11 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true,
     "noUncheckedIndexedAccess": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ],
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2024",
