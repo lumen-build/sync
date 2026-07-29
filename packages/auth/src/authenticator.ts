@@ -104,6 +104,7 @@ export const bearerAuthenticatorLayer = ({
   )
 
 export interface OidcIntrospectionAuthenticatorOptions {
+  readonly audience: string
   readonly clientId?: string
   readonly issuer: string | (() => string)
   readonly subjectClaim: string
@@ -111,7 +112,13 @@ export interface OidcIntrospectionAuthenticatorOptions {
 
 const IntrospectionClaims = Schema.Record(Schema.String, Schema.Unknown)
 
+const containsAudience = (value: unknown, audience: string): boolean =>
+  value === audience ||
+  (Array.isArray(value) &&
+    value.some((candidate) => typeof candidate === "string" && candidate === audience))
+
 export const oidcIntrospectionAuthenticatorLayer = ({
+  audience,
   clientId,
   issuer,
   subjectClaim,
@@ -191,6 +198,12 @@ export const oidcIntrospectionAuthenticatorLayer = ({
           return yield* new AuthenticationFailed({
             operation: "RequestAuthenticator.introspection.authenticate",
             reason: "token is inactive",
+          })
+        }
+        if (!containsAudience(claims.aud, audience)) {
+          return yield* new AuthenticationFailed({
+            operation: "RequestAuthenticator.introspection.authenticate",
+            reason: "token audience does not match the configured audience",
           })
         }
         const subject = claims[subjectClaim]

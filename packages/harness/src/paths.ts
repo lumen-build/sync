@@ -11,6 +11,9 @@ export interface HostPaths {
 export interface HarnessPaths {
   readonly configurations: Readonly<Record<Harness, string>>
   readonly ownership: string
+  readonly telemetry: {
+    readonly copilot: string
+  }
 }
 
 const joinHost = (platform: HostPaths["platform"], ...parts: ReadonlyArray<string>): string => {
@@ -58,20 +61,20 @@ const vscodeSettings = (host: HostPaths, root: string): string => {
 export const makeHarnessPaths = (host: HostPaths): HarnessPaths => {
   const root = configurationRoot(host)
   const supportDirectory = joinHost(host.platform, root, "lumen-build", "sync")
+  const copilotRoot = host.copilotHome ?? joinHost(host.platform, host.home, ".copilot")
 
   return {
     configurations: {
       claude: joinHost(host.platform, host.home, ".claude", "settings.json"),
       codex: joinHost(host.platform, host.home, ".codex", "config.toml"),
-      copilot: joinHost(
-        host.platform,
-        host.copilotHome ?? joinHost(host.platform, host.home, ".copilot"),
-        "settings.json",
-      ),
+      copilot: joinHost(host.platform, copilotRoot, "settings.json"),
       gemini: joinHost(host.platform, host.home, ".gemini", "settings.json"),
       opencode: joinHost(host.platform, root, "opencode", "opencode.json"),
       vscode: vscodeSettings(host, root),
     },
     ownership: joinHost(host.platform, supportDirectory, "harness-ownership.json"),
+    telemetry: {
+      copilot: joinHost(host.platform, copilotRoot, "otel", "lumen-sync.jsonl"),
+    },
   }
 }

@@ -35,6 +35,46 @@ it("maps usage-only OpenCode events without prompt or response content", () => {
   expect(usageFromOpenCodeEvent({ properties: {}, type: "message.updated" }, state)).toEqual([])
 })
 
+it("waits for the completed OpenCode message before deduplicating its usage", () => {
+  const state = makeOpenCodeUsageState()
+  const incomplete = {
+    properties: {
+      info: {
+        id: "message-progressive",
+        modelID: "model-mocked",
+        providerID: "provider-mocked",
+        role: "assistant",
+        time: { created: Date.parse("2026-07-29T12:00:00.000Z") },
+        tokens: { input: 0, output: 0 },
+      },
+    },
+    type: "message.updated",
+  }
+  const completed = {
+    properties: {
+      info: {
+        ...incomplete.properties.info,
+        time: {
+          completed: Date.parse("2026-07-29T12:00:01.000Z"),
+          created: Date.parse("2026-07-29T12:00:00.000Z"),
+        },
+        tokens: { input: 31, output: 13 },
+      },
+    },
+    type: "message.updated",
+  }
+
+  expect(usageFromOpenCodeEvent(incomplete, state)).toEqual([])
+  expect(usageFromOpenCodeEvent(completed, state)).toMatchObject([
+    {
+      id: "message-progressive",
+      input: 31,
+      output: 13,
+    },
+  ])
+  expect(usageFromOpenCodeEvent(completed, state)).toEqual([])
+})
+
 it("correlates the current step-started and step-ended events", () => {
   const state = makeOpenCodeUsageState()
   usageFromOpenCodeEvent(
@@ -132,6 +172,7 @@ it("rejects when the Lumen logs endpoint returns a non-success response", async 
       info: {
         id: "rejected-message",
         role: "assistant",
+        time: { completed: Date.parse("2026-07-29T12:00:00.000Z") },
         tokens: { input: 1, output: 1 },
       },
     },
@@ -182,6 +223,37 @@ it("retains step model identity when retrying a failed export", async () => {
   expect(retriedBody).toContain("retry-provider")
 })
 
+it("bounds a stalled collector export and releases the event for retry", async () => {
+  const fetchMock = vi
+    .fn<typeof fetch>()
+    .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+    .mockResolvedValueOnce(new Response(undefined, { status: 204 }))
+  const plugin = await LumenSync({
+    environment: {
+      LUMEN_COLLECTOR_OTLP_ENDPOINT: "https://collector.lumen.build",
+    },
+    fetch: fetchMock,
+    timeoutMillis: 10,
+  })
+  const event = {
+    properties: {
+      info: {
+        id: "stalled-message",
+        role: "assistant",
+        time: { completed: Date.parse("2026-07-29T12:00:00.000Z") },
+        tokens: { input: 8, output: 3 },
+      },
+    },
+    type: "message.updated",
+  }
+
+  await expect(plugin.event?.({ event })).rejects.toThrow(
+    "Lumen Sync collector timed out after 10ms",
+  )
+  await expect(plugin.event?.({ event })).resolves.toBeUndefined()
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+})
+
 it("bounds incomplete and completed OpenCode event state", () => {
   const state = makeOpenCodeUsageState(2)
   for (const id of ["one", "two", "three"]) {
@@ -205,6 +277,7 @@ it("bounds incomplete and completed OpenCode event state", () => {
           info: {
             id,
             role: "assistant",
+            time: { completed: Date.parse("2026-07-29T12:00:00.000Z") },
             tokens: { input: 1, output: 1 },
           },
         },

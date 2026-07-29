@@ -79,7 +79,7 @@ const assistantUsage = (info: JsonObject): AssistantUsage | undefined => {
   const model = object(info.model)
   const time = object(info.time)
   const id = text(info.id) ?? text(info.messageID)
-  if (tokens === undefined || id === undefined) return undefined
+  if (tokens === undefined || id === undefined || time?.completed === undefined) return undefined
 
   return {
     cacheRead: number(cache?.read),
@@ -231,6 +231,7 @@ const logsEndpoint = (endpoint: string): string =>
 interface OpenCodePluginInput {
   readonly environment?: Readonly<Record<string, string | undefined>>
   readonly fetch?: typeof globalThis.fetch
+  readonly timeoutMillis?: number
 }
 
 interface OpenCodeEventInput {
@@ -275,6 +276,7 @@ const definedEnvironment = (
 
 const makePlugin = Effect.fn("OpenCode.makePlugin")(function* (
   fetchImplementation?: typeof globalThis.fetch,
+  timeoutMillis = 5_000,
 ) {
   const endpoint = yield* normalizedEndpoint()
   if (endpoint === undefined) return {}
@@ -301,6 +303,11 @@ const makePlugin = Effect.fn("OpenCode.makePlugin")(function* (
         return cause instanceof Error
           ? cause
           : new Error(`Could not reach the Lumen Sync collector: ${error.message}`)
+      }),
+      Effect.timeoutOrElse({
+        duration: `${Math.max(1, Math.trunc(timeoutMillis))} millis`,
+        orElse: () =>
+          Effect.fail(new Error(`Lumen Sync collector timed out after ${timeoutMillis}ms`)),
       }),
     )
     if (response.status < 200 || response.status >= 300) {
@@ -331,8 +338,8 @@ export const LumenSync = (
 ): Promise<{ readonly event?: (input: OpenCodeEventInput) => Promise<void> }> => {
   const program =
     input.environment === undefined
-      ? makePlugin(input.fetch)
-      : makePlugin(input.fetch).pipe(
+      ? makePlugin(input.fetch, input.timeoutMillis)
+      : makePlugin(input.fetch, input.timeoutMillis).pipe(
           Effect.provide(
             ConfigProvider.layer(
               ConfigProvider.fromEnv({

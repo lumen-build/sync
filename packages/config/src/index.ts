@@ -19,6 +19,8 @@ const isSecureOrLoopbackUrl = (value: string): boolean => {
   const url = parseUrl(value)
   return (
     url !== undefined &&
+    url.username === "" &&
+    url.password === "" &&
     (url.protocol === "https:" || (url.protocol === "http:" && loopbackHosts.has(url.hostname)))
   )
 }
@@ -339,7 +341,8 @@ const joinHost = (platform: RuntimeHost["platform"], ...parts: ReadonlyArray<str
 const dirnameHost = (platform: RuntimeHost["platform"], value: string): string => {
   const separator = platform === "win32" ? "\\" : "/"
   const index = value.lastIndexOf(separator)
-  return index <= 0 ? separator : value.slice(0, index)
+  if (index < 0) return "."
+  return index === 0 ? separator : value.slice(0, index)
 }
 
 export interface ResolveRuntimePathsInput {

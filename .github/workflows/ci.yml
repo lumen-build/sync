@@ -61,7 +61,7 @@ jobs:
   product-e2e:
     name: Packed product E2E
     runs-on: ubuntu-latest
-    needs: package
+    needs: verify
     timeout-minutes: 15
 
     steps:
@@ -80,7 +80,7 @@ jobs:
   harness-e2e:
     name: Real harness E2E (${{ matrix.harness }})
     runs-on: ubuntu-latest
-    needs: product-e2e
+    needs: verify
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -88,6 +88,7 @@ jobs:
         harness:
           - claude
           - codex
+          - copilot
           - gemini
           - opencode
 

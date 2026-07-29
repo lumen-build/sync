@@ -27,7 +27,14 @@ the plugin from `./opencode`.
 All receiver wire schemas are runtime codecs, not TypeScript-only declarations:
 
 ```ts
-import { OtelLiveBatch } from "@lumen-build/sync/contracts"
+import {
+  DailySyncCommittedResponse,
+  DailySyncStartRequest,
+  DailySyncStartedResponse,
+  DailySyncUploadRequest,
+  OtelLiveBatch,
+  UsageAcceptedResponse,
+} from "@lumen-build/sync/contracts"
 import { Effect, Schema } from "effect"
 
 const decodeLiveBatch = (input: unknown) =>
@@ -36,10 +43,19 @@ const decodeLiveBatch = (input: unknown) =>
   })(input)
 
 const batch = await Effect.runPromise(decodeLiveBatch(requestBody))
+
+const dailyStart = await Effect.runPromise(
+  Schema.decodeUnknownEffect(DailySyncStartRequest)(dailyStartBody),
+)
+const dailyUpload = await Effect.runPromise(
+  Schema.decodeUnknownEffect(DailySyncUploadRequest)(dailyUploadBody),
+)
 ```
 
-`CcusageDailyBatch`, `UsageSnapshot`, `UsageCostSnapshot`, `CliEvent`, and their
-associated types are exported from the same entry point.
+`UsageAcceptedResponse`, `DailySyncStartedResponse`, and
+`DailySyncCommittedResponse` decode the three successful destination response
+shapes. `CcusageDailyBatch`, `UsageSnapshot`, `UsageCostSnapshot`, `CliEvent`,
+and their associated types are exported from the same entry point.
 
 ## Decode configuration with environment overrides
 
@@ -51,7 +67,7 @@ const configuration = await Effect.runPromise(
   Config.decodeWithEnvironment(
     {
       collector: { listen_url: "http://127.0.0.1:4318" },
-      destination: { base_url: "https://receiver.example" },
+      destination: { base_url: "https://usage.lumen.build" },
       auth: { mode: "bearer" },
     },
     process.env,
@@ -77,7 +93,7 @@ const credentials = Auth.bearerCredentialLayer({
 })
 
 const destination = Destination.layer({
-  baseUrl: "https://receiver.example",
+  baseUrl: "https://usage.lumen.build",
 }).pipe(Layer.provide(Layer.merge(BunHttpClient.layer, credentials)))
 
 const accepted = await Effect.runPromise(
@@ -89,7 +105,48 @@ const accepted = await Effect.runPromise(
 ```
 
 Production code should validate that the token exists before creating the
-layer. The CLI’s bearer and OIDC adapters provide that validation.
+layer. The CLI’s bearer and OIDC adapters provide that validation. The
+`lumen.build` URL in this example is mocked by this repository's tests; it is
+not a package default or hosted receiver.
+
+Embedding applications that need login/logout persistence can use
+`Auth.storedBearerCredentialLayer` with an application-owned `SecretStore`.
+The live token effect wins when present; `login` persists it, `accessToken`
+falls back to the stored value, and `logout` removes it.
+
+## Authenticate receiver requests
+
+Receiver applications can validate OIDC JWT access tokens against issuer
+discovery and JWKS. Both issuer and audience are operator-supplied:
+
+```ts
+import { BunHttpClient } from "@effect/platform-bun"
+import { Auth } from "@lumen-build/sync"
+import { Effect, Layer, Redacted } from "effect"
+
+const authentication = Auth.oidcJwtAuthenticatorLayer({
+  audience: process.env.LUMEN_RECEIVER_AUDIENCE ?? "",
+  issuer: process.env.LUMEN_RECEIVER_ISSUER ?? "",
+}).pipe(Layer.provide(BunHttpClient.layer))
+
+const principal = await Effect.runPromise(
+  Effect.gen(function* () {
+    const authenticator = yield* Auth.RequestAuthenticator
+    return yield* authenticator.authenticate(Redacted.make(accessToken))
+  }).pipe(Effect.provide(authentication)),
+)
+```
+
+For opaque access tokens, use `Auth.oidcIntrospectionAuthenticatorLayer` with
+the same required `issuer` and `audience`, plus the provider's `subjectClaim`
+and optional `clientId`. Introspection rejects inactive tokens, missing or
+mismatched audiences, and empty subjects. Discovery and every advertised OIDC
+endpoint must use HTTPS; plain HTTP is accepted only when the configured issuer
+itself is an explicit loopback URL for local tests.
+
+`Auth.bearerAuthenticatorLayer` accepts an application-owned verification
+effect when the receiver uses a shared or otherwise custom bearer-token scheme.
+Never construct these layers with empty environment values in production.
 
 ## Reconcile live and daily sources
 

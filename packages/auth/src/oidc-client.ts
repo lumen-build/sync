@@ -59,6 +59,44 @@ const authenticationFailed = (operation: string, reason: unknown): Authenticatio
     reason: reason instanceof Error ? reason.message : String(reason),
   })
 
+const loopbackHosts = new Set(["127.0.0.1", "[::1]", "::1", "localhost"])
+
+const validateOidcUrl = Effect.fn("OidcClient.validateUrl")(function* (
+  label: string,
+  value: string,
+  options: {
+    readonly allowHttpLoopback: boolean
+    readonly allowQuery: boolean
+  },
+) {
+  const url = yield* Effect.try({
+    try: () => new URL(value),
+    catch: (cause) => authenticationFailed("OidcClient.validateUrl", `${label}: ${String(cause)}`),
+  })
+  const secure = url.protocol === "https:"
+  const local =
+    options.allowHttpLoopback && url.protocol === "http:" && loopbackHosts.has(url.hostname)
+  if (!secure && !local) {
+    return yield* authenticationFailed(
+      "OidcClient.validateUrl",
+      `${label} must use HTTPS (HTTP is allowed only for an explicit loopback issuer)`,
+    )
+  }
+  if (url.username.length > 0 || url.password.length > 0) {
+    return yield* authenticationFailed(
+      "OidcClient.validateUrl",
+      `${label} must not contain credentials`,
+    )
+  }
+  if (url.hash.length > 0 || (!options.allowQuery && url.search.length > 0)) {
+    return yield* authenticationFailed(
+      "OidcClient.validateUrl",
+      `${label} contains unsupported URL components`,
+    )
+  }
+  return url
+})
+
 const requestJson = Effect.fn("OidcClient.requestJson")(function* (
   operation: string,
   request: HttpClientRequest.HttpClientRequest,
@@ -71,11 +109,7 @@ const requestJson = Effect.fn("OidcClient.requestJson")(function* (
         .execute(HttpClientRequest.acceptJson(request))
         .pipe(Effect.mapError((error) => authenticationFailed(operation, error)))
       if (response.status < 200 || response.status >= 300) {
-        const body = yield* response.text.pipe(Effect.orElseSucceed(() => ""))
-        return yield* authenticationFailed(
-          operation,
-          `HTTP ${response.status}${body.length === 0 ? "" : `: ${body.slice(0, 512)}`}`,
-        )
+        return yield* authenticationFailed(operation, `HTTP ${response.status}`)
       }
       return yield* response.json.pipe(
         Effect.mapError((error) => authenticationFailed(`${operation}.decodeJson`, error)),
@@ -101,15 +135,59 @@ const requestVoid = Effect.fn("OidcClient.requestVoid")(function* (
 })
 
 export const discover = Effect.fn("OidcClient.discover")(function* (issuer: string) {
+  const configuredIssuer = yield* validateOidcUrl("configured issuer", issuer, {
+    allowHttpLoopback: true,
+    allowQuery: false,
+  })
+  const allowHttpLoopback = configuredIssuer.protocol === "http:"
   const url = new URL(
     ".well-known/openid-configuration",
-    issuer.endsWith("/") ? issuer : `${issuer}/`,
+    configuredIssuer.toString().endsWith("/")
+      ? configuredIssuer
+      : `${configuredIssuer.toString()}/`,
   )
   const json = yield* requestJson("OidcClient.discover", HttpClientRequest.get(url))
   const document = yield* Schema.decodeUnknownEffect(DiscoveryDocument)(json).pipe(
     Effect.mapError((error) => authenticationFailed("OidcClient.decodeDiscovery", error)),
   )
-  if (document.issuer.replace(/\/$/, "") !== issuer.replace(/\/$/, "")) {
+  const documentIssuer = yield* validateOidcUrl("discovered issuer", document.issuer, {
+    allowHttpLoopback,
+    allowQuery: false,
+  })
+  yield* Effect.all([
+    validateOidcUrl("authorization endpoint", document.authorization_endpoint, {
+      allowHttpLoopback,
+      allowQuery: true,
+    }),
+    validateOidcUrl("JWKS endpoint", document.jwks_uri, {
+      allowHttpLoopback,
+      allowQuery: true,
+    }),
+    validateOidcUrl("token endpoint", document.token_endpoint, {
+      allowHttpLoopback,
+      allowQuery: true,
+    }),
+    ...(document.introspection_endpoint === undefined
+      ? []
+      : [
+          validateOidcUrl("introspection endpoint", document.introspection_endpoint, {
+            allowHttpLoopback,
+            allowQuery: true,
+          }),
+        ]),
+    ...(document.revocation_endpoint === undefined
+      ? []
+      : [
+          validateOidcUrl("revocation endpoint", document.revocation_endpoint, {
+            allowHttpLoopback,
+            allowQuery: true,
+          }),
+        ]),
+  ])
+  if (
+    documentIssuer.toString().replace(/\/+$/u, "") !==
+    configuredIssuer.toString().replace(/\/+$/u, "")
+  ) {
     return yield* Effect.fail(
       authenticationFailed(
         "OidcClient.discover",

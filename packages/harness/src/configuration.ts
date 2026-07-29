@@ -5,14 +5,15 @@ import { Effect, Option, Predicate, Schema } from "effect"
 import { applyEdits, modify, parse } from "jsonc-parser"
 import type { FormattingOptions, ParseError } from "jsonc-parser"
 
+import { normalizeCollectorUrl } from "./collector-url"
 import {
   HarnessConfigurationConflict,
   HarnessConfigurationError,
-  type ConfigurationState,
   type Harness,
   type ManagedChange,
   type ManagedValue,
   type PreparedConfiguration,
+  configurationState,
   managedPathKey,
   managedValuesEqual,
 } from "./model"
@@ -54,10 +55,9 @@ const isPresent = (
   value: ManagedValue,
 ): value is Extract<ManagedValue, { readonly _tag: "Present" }> => value._tag === "Present"
 
-const baseUrl = (collectorUrl: string): string => collectorUrl.replace(/\/+$/u, "")
 const openCodePlugin = "@lumen-build/sync"
 const endpoint = (collectorUrl: string, signal: "logs" | "metrics" | "traces"): string =>
-  `${baseUrl(collectorUrl)}/v1/${signal}`
+  `${normalizeCollectorUrl(collectorUrl)}/v1/${signal}`
 
 const otlpHttp = (collectorUrl: string, signal: "logs" | "metrics" | "traces"): Schema.Json => ({
   "otlp-http": {
@@ -101,19 +101,16 @@ export const specifications = (
         },
       ]
     case "copilot":
-      return [
-        { path: ["telemetry", "enabled"], value: present(true) },
-        { path: ["telemetry", "endpoint"], value: present(baseUrl(collectorUrl)) },
-        { path: ["telemetry", "protocol"], value: present("http/protobuf") },
-        { path: ["telemetry", "captureContent"], value: present(false) },
-        { path: ["telemetry", "serviceName"], value: present("github-copilot") },
-      ]
+      return []
     case "gemini":
       return [
         { path: ["telemetry", "enabled"], value: present(true) },
         { path: ["telemetry", "target"], value: present("local") },
         { path: ["telemetry", "useCollector"], value: present(true) },
-        { path: ["telemetry", "otlpEndpoint"], value: present(baseUrl(collectorUrl)) },
+        {
+          path: ["telemetry", "otlpEndpoint"],
+          value: present(normalizeCollectorUrl(collectorUrl)),
+        },
         { path: ["telemetry", "otlpProtocol"], value: present("http") },
         { path: ["telemetry", "logPrompts"], value: present(false) },
         { path: ["telemetry", "traces"], value: present(false) },
@@ -136,7 +133,7 @@ export const specifications = (
         },
         {
           path: ["github.copilot.chat.otel.otlpEndpoint"],
-          value: present(baseUrl(collectorUrl)),
+          value: present(normalizeCollectorUrl(collectorUrl)),
         },
         { path: ["github.copilot.chat.otel.captureContent"], value: present(false) },
       ]
@@ -197,16 +194,6 @@ const setPath = (
   }
   output[segment] = setPath(output[segment], remaining, value)
   return output
-}
-
-const stateFor = (
-  changes: ReadonlyArray<ManagedChange>,
-  conflicts: ReadonlyArray<ManagedChange>,
-  total: number,
-): ConfigurationState => {
-  if (conflicts.length > 0) return "conflicting"
-  if (changes.length === 0) return "exact"
-  return changes.length === total ? "missing" : "partial"
 }
 
 const isAdditiveChange = (setting: ManagedSetting, change: ManagedChange): boolean => {
@@ -378,7 +365,7 @@ export const prepareConfiguration = Effect.fn("HarnessConfiguration.prepare")(fu
       (setting === undefined || !isAdditiveChange(setting, change))
     )
   })
-  const state = stateFor(differences, conflicts, settings.length)
+  const state = configurationState(differences.length, conflicts.length, settings.length)
   if (conflicts.length > 0 && !force) {
     return yield* new HarnessConfigurationConflict({
       fields: conflicts.map((change) => change.path.join(".")),

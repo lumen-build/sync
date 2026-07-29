@@ -9,10 +9,78 @@ import { expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
 
 import { bunHarnessFileSystemLayer } from "./lifecycle-bun"
+import { requiredHarnessEnvironment } from "./environment"
 import { configureHarness, inspectHarness, removeHarness } from "./lifecycle"
 import { makeHarnessPaths } from "./paths"
 
 const lifecycleLayer = bunHarnessFileSystemLayer.pipe(Layer.provide(BunServices.layer))
+
+it.effect("handles environment-only harnesses without touching user settings", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-sync-harness-"))),
+    (home) =>
+      Effect.gen(function* () {
+        const paths = makeHarnessPaths({
+          configHome: join(home, ".config"),
+          home,
+          platform: "linux",
+        })
+        const collectorUrl = "https://collector.lumen.build"
+        const context = {
+          collectorUrl,
+          copilotTelemetryPath: paths.telemetry.copilot,
+        }
+        const missing = yield* configureHarness({
+          collectorUrl,
+          environment: {},
+          force: false,
+          harness: "copilot",
+          paths,
+        })
+        expect(missing).toMatchObject({
+          changes: [],
+          state: "missing",
+          status: {
+            managed: false,
+            path: "environment",
+            state: "missing",
+          },
+        })
+        expect(missing.environment).toEqual(requiredHarnessEnvironment("copilot", context))
+        expect(
+          yield* Effect.promise(() =>
+            readFile(paths.configurations.copilot, "utf8").then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false)
+        expect(
+          yield* Effect.promise(() =>
+            readFile(paths.ownership, "utf8").then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false)
+
+        expect(
+          yield* inspectHarness({
+            collectorUrl,
+            environment: requiredHarnessEnvironment("copilot", context),
+            harness: "copilot",
+            paths,
+          }),
+        ).toMatchObject({
+          environment: requiredHarnessEnvironment("copilot", context),
+          managed: false,
+          path: "environment",
+          state: "exact",
+        })
+      }),
+    (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
+  ).pipe(Effect.provide(lifecycleLayer)),
+)
 
 it.effect("reports missing, exact, and conflicting harness configuration", () =>
   Effect.acquireUseRelease(

@@ -35,6 +35,18 @@ try {
       cwd: temporary,
       stdio: "ignore",
     })
+    const installedManifest = JSON.parse(
+      readFileSync(join(temporary, "node_modules", "@lumen-build", "sync", "package.json"), "utf8"),
+    )
+    const reportedVersion = execFileSync(executable, ["--version"], {
+      cwd: temporary,
+      encoding: "utf8",
+    }).trim()
+    if (reportedVersion !== installedManifest.version) {
+      throw new Error(
+        `CLI reported ${JSON.stringify(reportedVersion)} but package version is ${JSON.stringify(installedManifest.version)}`,
+      )
+    }
 
     const smokePath = join(temporary, "smoke.mjs")
     writeFileSync(

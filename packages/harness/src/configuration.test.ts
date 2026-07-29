@@ -21,6 +21,7 @@ it("registers every supported harness and its integration shape", () => {
     integration: "opencode-plugin",
     signals: ["logs"],
   })
+  expect(harnessRegistry.copilot.format).toBe("environment")
   expect(
     harnesses.filter(({ integration }) => integration === "native-otel").map(({ id }) => id),
   ).toEqual(["claude", "codex", "copilot", "gemini", "vscode"])
@@ -31,7 +32,6 @@ it.effect("configures every harness without adding a default collector", () =>
     const supportedHarnesses: ReadonlyArray<Harness> = [
       "claude",
       "codex",
-      "copilot",
       "gemini",
       "opencode",
       "vscode",
@@ -55,6 +55,23 @@ it.effect("configures every harness without adding a default collector", () =>
       expect(repeated.state).toBe("exact")
       expect(repeated.changes).toEqual([])
     }
+  }),
+)
+
+it.effect("does not write enterprise-only Copilot telemetry into user settings", () =>
+  Effect.gen(function* () {
+    const configured = yield* prepareConfiguration({
+      collectorUrl,
+      contents: '{ "theme": "dark" }\n',
+      force: false,
+      harness: "copilot",
+    })
+
+    expect(configured).toEqual({
+      changes: [],
+      contents: '{ "theme": "dark" }\n',
+      state: "exact",
+    })
   }),
 )
 
@@ -171,7 +188,9 @@ it("resolves all supported operating-system configuration locations", () => {
 
   expect(mac.configurations.vscode).toContain("Library/Application Support/Code")
   expect(linux.configurations.opencode).toBe("/home/dev/.config/opencode/opencode.json")
+  expect(linux.telemetry.copilot).toBe("/home/dev/.copilot/otel/lumen-sync.jsonl")
   expect(windows.configurations.vscode).toBe(
     "C:\\Users\\dev\\AppData\\Roaming\\Code\\User\\settings.json",
   )
+  expect(windows.telemetry.copilot).toBe("C:\\Users\\dev\\.copilot\\otel\\lumen-sync.jsonl")
 })

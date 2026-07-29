@@ -215,6 +215,40 @@ it.effect("normalizes the official token metrics from five native OTEL harnesses
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )
 
+it.effect("retains distinct equal-valued metric points from one export", () =>
+  Effect.gen(function* () {
+    const normalizer = yield* UsageNormalizer
+    const store = yield* LiveUsageStore
+    const point = {
+      attributes: { "gen_ai.token.type": "output" },
+      timestamp,
+      value: 3,
+    }
+    const events = yield* normalizer.normalize({
+      _tag: "Metrics",
+      metrics: [
+        {
+          dataKind: "sum",
+          name: "gen_ai.client.token.usage",
+          points: [point, point],
+          resourceAttributes: {
+            "gen_ai.request.model": "mock-model",
+            "service.name": "claude-code",
+          },
+          temporality: "delta",
+          unit: "{token}",
+        },
+      ],
+    })
+
+    expect(events).toHaveLength(2)
+    expect(new Set(events.map((event) => event.fingerprint)).size).toBe(2)
+    expect(yield* store.ingest(events)).toBe(2)
+    expect(yield* store.ingest(events)).toBe(0)
+    expect((yield* store.snapshot(timestamp)).snapshots[0]?.tokens.output).toBe(6)
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
 it.effect("deduplicates events and increments live revisions atomically", () =>
   Effect.gen(function* () {
     const normalizer = yield* UsageNormalizer

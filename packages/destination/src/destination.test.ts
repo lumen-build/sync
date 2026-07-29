@@ -1,13 +1,22 @@
-import { bearerCredentialLayer } from "@lumen-build/sync-auth"
+import { CredentialProvider, bearerCredentialLayer } from "@lumen-build/sync-auth"
 import type { CcusageDailyBatch, OtelLiveBatch } from "@lumen-build/sync-contracts"
-import { Effect, Redacted } from "effect"
+import { Effect, Fiber, Layer, Redacted } from "effect"
+import { HttpClient, HttpClientResponse } from "effect/unstable/http"
+import { TestClock } from "effect/testing"
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient"
 import { it } from "@effect/vitest"
 import { http, HttpResponse } from "msw"
 import { setupServer } from "msw/node"
 import { expect } from "vitest"
 
-import { Destination, InvalidDestinationResponse, layer } from "./index.js"
+import {
+  Destination,
+  DestinationUnavailable,
+  InvalidDestinationConfiguration,
+  InvalidDestinationResponse,
+  layer,
+  make,
+} from "./index.js"
 
 const deviceId = "ec7100cb-d60f-479a-a136-85327ec03f8b"
 const syncId = "11236047-7ee3-4238-8157-f189bbc16927"
@@ -156,6 +165,89 @@ it.effect("rejects a mismatched start sync ID before uploading snapshots or comm
         }),
       ),
       Effect.provide(FetchHttpClient.layer),
+    ),
+  ),
+)
+
+it.effect("rejects unsafe library base URLs before acquiring a bearer token", () =>
+  Effect.gen(function* () {
+    let tokenReads = 0
+    const credentials = Layer.succeed(
+      CredentialProvider,
+      CredentialProvider.of({
+        accessToken: () =>
+          Effect.sync(() => {
+            tokenReads += 1
+            return Redacted.make("must-not-be-sent")
+          }),
+        login: () => Effect.void,
+        logout: () => Effect.void,
+      }),
+    )
+    const httpClient = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make(() => Effect.die("unsafe destination must not execute a request")),
+    )
+
+    for (const baseUrl of [
+      "http://usage.lumen.build",
+      "https://user:password@usage.lumen.build",
+      "https://usage.lumen.build?tenant=secret",
+      "file:///tmp/receiver",
+    ]) {
+      const failure = yield* Effect.flip(
+        make({ baseUrl }).pipe(Effect.provide(Layer.merge(credentials, httpClient))),
+      )
+      expect(failure).toBeInstanceOf(InvalidDestinationConfiguration)
+    }
+    expect(tokenReads).toBe(0)
+
+    const local = yield* make({ baseUrl: "http://127.0.0.1:4318" }).pipe(
+      Effect.provide(Layer.merge(credentials, httpClient)),
+    )
+    expect(local.baseUrl).toBe("http://127.0.0.1:4318")
+    expect(tokenReads).toBe(0)
+  }),
+)
+
+it.effect("times out while reading an incomplete successful response body", () =>
+  Effect.gen(function* () {
+    const destination = yield* Destination
+    const fiber = yield* Effect.flip(destination.putLive(liveBatch)).pipe(Effect.forkChild)
+    yield* TestClock.adjust("10 millis")
+    const failure = yield* Fiber.join(fiber)
+    expect(failure).toBeInstanceOf(DestinationUnavailable)
+    if (!(failure instanceof DestinationUnavailable)) {
+      throw new Error("expected DestinationUnavailable")
+    }
+    expect(failure.reason).toBe("request timed out")
+  }).pipe(
+    Effect.provide(layer({ baseUrl: "https://usage.lumen.build", timeout: "10 millis" })),
+    Effect.provide(
+      bearerCredentialLayer({
+        token: Effect.succeed(Redacted.make("mocked-lumen-token")),
+      }),
+    ),
+    Effect.provideService(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start() {
+                  // Deliberately never close the body.
+                },
+              }),
+              {
+                headers: { "content-type": "application/json" },
+                status: 200,
+              },
+            ),
+          ),
+        ),
+      ),
     ),
   ),
 )

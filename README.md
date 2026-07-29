@@ -105,6 +105,18 @@ export LUMEN_BEARER_TOKEN="..."
 lumen-sync config show
 ```
 
+Commands use the environment value directly. To make the token available to a
+background user service without embedding it in the service definition, store
+it in the mode-`0600` credential file and then clear the environment:
+
+```sh
+LUMEN_BEARER_TOKEN="..." lumen-sync auth login
+unset LUMEN_BEARER_TOKEN
+```
+
+`lumen-sync auth logout` removes the stored bearer token. Tokens are never
+written to TOML.
+
 Endpoint environment overrides are also supported:
 
 ```sh
@@ -154,10 +166,15 @@ lumen-sync config init \
 ```
 
 Refresh tokens are stored in a mode-`0600` file in the platform data directory,
-or beside an explicitly selected configuration. For CI, Lumen Sync accepts an
-explicit `LUMEN_OIDC_ASSERTION` and detects GitHub Actions OIDC, GitLab CI JWT,
-and CircleCI OIDC environments. OIDC discovery, refresh, revocation, JWKS
-validation, and introspection remain reusable library APIs.
+or beside an explicitly selected configuration. Stored tokens are scoped to
+the canonical issuer, client ID, and audience, so replacing an identity
+provider cannot send its predecessor's refresh token to the new token
+endpoint. Discovery requires HTTPS for the issuer and every advertised
+endpoint; HTTP is accepted only when the configured issuer and advertised
+endpoint are explicit loopback URLs. For CI, Lumen Sync accepts an explicit
+`LUMEN_OIDC_ASSERTION` and detects GitHub Actions OIDC, GitLab CI JWT, and
+CircleCI OIDC environments. OIDC discovery, refresh, revocation, JWKS
+validation, and audience-checked introspection remain reusable library APIs.
 
 ## Configure agent harnesses
 
@@ -172,14 +189,14 @@ lumen-sync harness remove
 
 Existing JSONC comments and unrelated settings are retained. Conflicting managed values require `--force`. Removal restores only values that still match what Lumen Sync wrote; user changes are preserved.
 
-| Harness            | Integration                        | Configuration                | Linux E2E evidence                                                                        |
-| ------------------ | ---------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------- |
-| Claude Code        | Native OTLP metrics                | `~/.claude/settings.json`    | Real CLI; exact mocked input/output counts in native live and ccusage daily data          |
-| Codex              | Native OTLP metrics                | `~/.codex/config.toml`       | Real CLI; exact mocked input/output counts in native live and ccusage daily data          |
-| GitHub Copilot CLI | Native OTLP, currently best effort | `~/.copilot/settings.json`   | Configuration and shaped telemetry tests only; no real-CLI E2E yet                        |
-| Gemini CLI         | Native OTLP collector              | `~/.gemini/settings.json`    | Real CLI and exact mocked input/output counts in daily data; live OTLP not observed       |
-| OpenCode           | Usage-only plugin plus ccusage     | XDG/APPDATA OpenCode config  | Real CLI, packed plugin live envelope, and exact mocked input/output counts in daily data |
-| VS Code Copilot    | Native OTLP                        | VS Code user `settings.json` | Configuration and shaped telemetry tests only; no headless real-client E2E yet            |
+| Harness            | Integration                    | Configuration                | Linux E2E evidence                                                                         |
+| ------------------ | ------------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------ |
+| Claude Code        | Native OTLP metrics            | `~/.claude/settings.json`    | Real CLI; two strict requests, exact native aggregate, and exact final-request daily usage |
+| Codex              | Native OTLP metrics            | `~/.codex/config.toml`       | Real CLI; one strict request and exact request-derived live and daily usage                |
+| GitHub Copilot CLI | Native OTEL file plus ccusage  | Environment                  | Real CLI; one strict request, exact file telemetry, and exact daily usage                  |
+| Gemini CLI         | Native OTLP collector          | `~/.gemini/settings.json`    | Real CLI; one strict request and exact request-derived daily usage; live OTLP not observed |
+| OpenCode           | Usage-only plugin plus ccusage | XDG/APPDATA OpenCode config  | Real CLI; auxiliary and primary requests plus exact primary live and daily usage           |
+| VS Code Copilot    | Native OTLP                    | VS Code user `settings.json` | Configuration and shaped telemetry tests only; no headless real-client E2E yet             |
 
 Content capture is disabled. Claude and Codex are configured to send token metrics, not prompt-bearing logs. Gemini traces and prompt logging are disabled. VS Code and Copilot content capture are disabled.
 
@@ -191,13 +208,36 @@ export LUMEN_COLLECTOR_OTLP_ENDPOINT="http://127.0.0.1:4318"
 
 If the plugin cannot be used, OpenCode daily sync through ccusage remains available.
 
+GitHub Copilot CLI does not expose its supported telemetry controls through
+ordinary user settings. `harness configure --agent copilot` therefore reports
+the exact environment it expects without modifying
+`~/.copilot/settings.json`. The default managed path uses Copilot's documented
+JSON-lines file exporter:
+
+```sh
+export COPILOT_OTEL_ENABLED="true"
+export COPILOT_OTEL_EXPORTER_TYPE="file"
+export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/lumen-sync.jsonl"
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT="false"
+export OTEL_SERVICE_NAME="github-copilot"
+```
+
+Use the values printed by `harness configure` on Windows or when
+`COPILOT_HOME` is set. `sync daily --agent copilot` reads that file through
+ccusage. This path is a recoverable daily source, not a live upload. Copilot's
+HTTP exporter refuses cleartext endpoints, including Lumen's loopback HTTP
+collector; direct live export therefore requires an operator-supplied HTTPS
+OTLP ingress and is not claimed by the local E2E.
+
 The pinned OpenCode E2E resolves the installed tarball through OpenCode's native
-package-plugin cache and proves that the managed plugin entry emits a live
-envelope. Its first event currently reports zero token fields; the daily ccusage
-import is non-empty. Gemini CLI 0.53.0 consumes the exact managed telemetry
-configuration and creates a non-empty ccusage report, but did not flush native
-OTLP to the collector in two bounded test runs. Neither limitation is hidden by
-injecting an undocumented endpoint or by waiting indefinitely.
+package-plugin cache. It waits for the completed assistant event, then proves
+the exact primary input/output pair through both the live plugin and ccusage.
+OpenCode also makes an auxiliary title request; the strict mock proves that
+request separately while the destination assertion proves that OpenCode's usage
+surfaces expose only the primary call. Gemini CLI 0.53.0 consumes the exact
+managed telemetry configuration and creates a non-empty ccusage report, but did
+not flush native OTLP to the collector in a bounded test run. That limitation
+is not hidden by injecting an undocumented endpoint or waiting indefinitely.
 
 The harness settings follow the vendors’ observability and extension surfaces: [Claude Code](https://code.claude.com/docs/en/agent-sdk/observability), [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced), [VS Code Copilot](https://code.visualstudio.com/docs/agents/guides/monitoring-agents), [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), [Gemini CLI](https://geminicli.com/docs/cli/telemetry/), and [OpenCode plugins](https://opencode.ai/docs/plugins/).
 
@@ -221,6 +261,13 @@ the configuration. A restarted service resumes from that checkpoint, so its
 revision sequence remains compatible with the receiver. Events received after
 the latest checkpoint can still be lost in a hard crash; the later ccusage
 daily import is the recovery source for that window.
+
+Each live upload is intentionally a cumulative recovery envelope rather than a
+delta. That lets a new or restarted receiver reconstruct the latest state from
+one accepted envelope, but upload and checkpoint work grows with the retained
+bucket set. Retention and the 100,000-fingerprint cap bound that state; operators
+should monitor checkpoint and request sizes when collecting many distinct
+day/agent/provider/model identities.
 
 For parsing tests or a receiver-less local experiment:
 
@@ -491,7 +538,10 @@ CLI failure exits.
 Any non-2xx response rejects the operation with `DestinationRejected` and the
 HTTP status; the response body is not decoded. A transport failure or timeout
 becomes `DestinationUnavailable`. A 2xx response with missing, non-JSON, or
-wrongly typed fields becomes `InvalidDestinationResponse`.
+wrongly typed fields becomes `InvalidDestinationResponse`. Constructing the
+library destination layer with a non-HTTPS/non-loopback, credential-bearing,
+query-bearing, or fragment-bearing base URL fails with
+`InvalidDestinationConfiguration`.
 
 For daily sync, a failed start prevents upload and commit, and a failed upload
 prevents commit. Receivers should use `401` for a missing or invalid token,
@@ -593,17 +643,36 @@ requirements, environment-over-TOML precedence, live retry/checkpoint/restart
 behavior, deduplication, a non-empty bundled ccusage import with lost-response
 replay, CI OIDC assertion exchange, and local PKCE login/refresh/revocation.
 
-The Linux real-harness matrix pins Claude Code 2.1.220, Codex 0.146.0, Gemini
-CLI 0.53.0, OpenCode 1.18.9, [aimock](https://aimock.copilotkit.dev/) 1.37.4,
-and Node 22.23.1 in a separate lockfile. Each case configures and re-inspects
-the harness through the installed CLI, sends a canary prompt to a strict local
-model mock, runs the real vendor binary, proves a non-empty daily ccusage
-import, and verifies that the destination never receives the prompt. Claude
-and Codex additionally prove that the exact mocked input/output token pairs
-`17/5` and `19/7` reach both native live and daily data. Gemini and OpenCode
-prove exact daily pairs `23/11` and `29/13`; OpenCode also proves a
-packed-plugin live envelope. Copilot CLI and VS Code remain outside the
-real-client matrix and are not described as real-client verified.
+The Linux real-harness matrix pins Claude Code 2.1.220, Codex 0.146.0, GitHub
+Copilot CLI 1.0.75, Gemini CLI 0.53.0, OpenCode 1.18.9,
+[aimock](https://aimock.copilotkit.dev/) 1.37.4, and Node 22.23.1 in a separate
+lockfile. Each case configures and re-inspects the harness through the installed
+CLI, sends a canary prompt to a strict local model mock, runs the real vendor
+binary, proves a non-empty daily ccusage import, and verifies that the
+destination never receives the prompt.
+
+The mock's request journal must match the exact request count, provider route,
+model sequence, message-role shape, system-message count, tool count, and one
+canary occurrence per request. Its usage response is generated from a
+fixed per-request golden fixture that is independent of the request meter. The
+meter separately asserts the exact lexical input, system, and overhead counts
+for every normalized message and tool string, so harness-added system
+instructions and tool schemas are part of the proof instead of moving both
+sides of one assertion together. The destination must then contain exactly the
+source-appropriate input/output pairs and no additional pairs. Claude's native metric combines
+both request inputs with the final output while ccusage records the final
+request. OpenCode makes an auxiliary title request but exposes only the primary
+request through its usage event and ccusage. Codex is one-to-one; Gemini proves
+the exact daily path because native live OTLP was not observed. Copilot proves
+that its native file metric and the ccusage daily snapshot both preserve the
+single request's exact input/output pair.
+
+These assertions prove the exact lexical request envelope and lossless
+propagation of an independently fixed provider usage response. The lexical
+meter does not claim to reproduce proprietary provider tokenizers; a real
+provider's usage response is the production authority. VS Code remains outside
+the real-client matrix because its extension has no supported headless client
+E2E.
 
 CI runs on macOS, Linux, and Windows with Bun 1.3.4 and asserts that exact
 runtime version. It runs formatting, lint, TypeScript, Effect-specific

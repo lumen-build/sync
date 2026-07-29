@@ -157,6 +157,49 @@ export const CcusageDailyBatch = Schema.Struct({
 
 export interface CcusageDailyBatch extends Schema.Schema.Type<typeof CcusageDailyBatch> {}
 
+export const DailySyncStartRequest = Schema.Struct({
+  capturedAt: CcusageDailyBatch.fields.capturedAt,
+  costSnapshotCount: NonNegativeSafeInteger,
+  deviceId: CcusageDailyBatch.fields.deviceId,
+  snapshotCount: NonNegativeSafeInteger,
+  source: CcusageDailyBatch.fields.source,
+  sourceVersion: CcusageDailyBatch.fields.sourceVersion,
+  timeZone: CcusageDailyBatch.fields.timeZone,
+}).annotate({ identifier: "DailySyncStartRequest" })
+
+export interface DailySyncStartRequest extends Schema.Schema.Type<typeof DailySyncStartRequest> {}
+
+export const DailySyncUploadRequest = Schema.Struct({
+  costs: CcusageDailyBatch.fields.costs,
+  snapshots: CcusageDailyBatch.fields.snapshots,
+  source: CcusageDailyBatch.fields.source,
+}).annotate({ identifier: "DailySyncUploadRequest" })
+
+export interface DailySyncUploadRequest extends Schema.Schema.Type<typeof DailySyncUploadRequest> {}
+
+export const UsageAcceptedResponse = Schema.Struct({
+  accepted: NonNegativeSafeInteger,
+}).annotate({ identifier: "UsageAcceptedResponse" })
+
+export interface UsageAcceptedResponse extends Schema.Schema.Type<typeof UsageAcceptedResponse> {}
+
+export const DailySyncStartedResponse = Schema.Struct({
+  status: Schema.Literal("pending"),
+  syncId: SyncId,
+}).annotate({ identifier: "DailySyncStartedResponse" })
+
+export interface DailySyncStartedResponse extends Schema.Schema.Type<
+  typeof DailySyncStartedResponse
+> {}
+
+export const DailySyncCommittedResponse = Schema.Struct({
+  committed: NonNegativeSafeInteger,
+}).annotate({ identifier: "DailySyncCommittedResponse" })
+
+export interface DailySyncCommittedResponse extends Schema.Schema.Type<
+  typeof DailySyncCommittedResponse
+> {}
+
 export const UsageSourceBatch = Schema.Union([OtelLiveBatch, CcusageDailyBatch])
 
 export type UsageSourceBatch = typeof UsageSourceBatch.Type

@@ -1,23 +1,11 @@
-import { CcusageDailyBatch, NonNegativeSafeInteger } from "@lumen-build/sync/contracts"
+import { DailySyncStartRequest, DailySyncUploadRequest } from "@lumen-build/sync/contracts"
 import { Schema } from "effect"
 
-export const DailyStart = Schema.Struct({
-  capturedAt: CcusageDailyBatch.fields.capturedAt,
-  costSnapshotCount: NonNegativeSafeInteger,
-  deviceId: CcusageDailyBatch.fields.deviceId,
-  snapshotCount: NonNegativeSafeInteger,
-  source: CcusageDailyBatch.fields.source,
-  sourceVersion: CcusageDailyBatch.fields.sourceVersion,
-  timeZone: CcusageDailyBatch.fields.timeZone,
-})
+export const DailyStart = DailySyncStartRequest
 
 export interface DailyStart extends Schema.Schema.Type<typeof DailyStart> {}
 
-export const DailyUpload = Schema.Struct({
-  costs: CcusageDailyBatch.fields.costs,
-  snapshots: CcusageDailyBatch.fields.snapshots,
-  source: CcusageDailyBatch.fields.source,
-})
+export const DailyUpload = DailySyncUploadRequest
 
 export interface DailyUpload extends Schema.Schema.Type<typeof DailyUpload> {}
 

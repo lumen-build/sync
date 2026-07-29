@@ -1,14 +1,16 @@
 import { CredentialProvider, type CredentialError } from "@lumen-build/sync-auth"
-import { type CcusageDailyBatch, type OtelLiveBatch, SyncId } from "@lumen-build/sync-contracts"
+import { NetworkUrl } from "@lumen-build/sync-config"
+import {
+  type CcusageDailyBatch,
+  DailySyncCommittedResponse,
+  type DailySyncStartRequest,
+  DailySyncStartedResponse,
+  type DailySyncUploadRequest,
+  type OtelLiveBatch,
+  UsageAcceptedResponse,
+} from "@lumen-build/sync-contracts"
 import { Context, Effect, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-
-const Accepted = Schema.Struct({ accepted: Schema.Number })
-const SyncCommitted = Schema.Struct({ committed: Schema.Number })
-const SyncStarted = Schema.Struct({
-  status: Schema.Literal("pending"),
-  syncId: SyncId,
-})
 
 export class DestinationUnavailable extends Schema.TaggedErrorClass<DestinationUnavailable>()(
   "DestinationUnavailable",
@@ -26,6 +28,13 @@ export class DestinationRejected extends Schema.TaggedErrorClass<DestinationReje
 
 export class InvalidDestinationResponse extends Schema.TaggedErrorClass<InvalidDestinationResponse>()(
   "InvalidDestinationResponse",
+  {
+    reason: Schema.String,
+  },
+) {}
+
+export class InvalidDestinationConfiguration extends Schema.TaggedErrorClass<InvalidDestinationConfiguration>()(
+  "InvalidDestinationConfiguration",
   {
     reason: Schema.String,
   },
@@ -54,6 +63,24 @@ export interface DestinationOptions {
 
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.replace(/\/+$/, "")
 
+const validateBaseUrl = Effect.fn("Destination.validateBaseUrl")(function* (baseUrl: string) {
+  const decoded = yield* Schema.decodeUnknownEffect(NetworkUrl)(baseUrl).pipe(
+    Effect.mapError(
+      () =>
+        new InvalidDestinationConfiguration({
+          reason: "base URL must use HTTPS or HTTP loopback and must not contain credentials",
+        }),
+    ),
+  )
+  const url = new URL(decoded)
+  if (url.search.length > 0 || url.hash.length > 0) {
+    return yield* new InvalidDestinationConfiguration({
+      reason: "base URL must not contain a query or fragment",
+    })
+  }
+  return normalizeBaseUrl(url.toString())
+})
+
 const authenticated = (
   request: HttpClientRequest.HttpClientRequest,
   token: import("effect").Redacted.Redacted<string>,
@@ -63,31 +90,34 @@ export const make = Effect.fn("Destination.make")(function* ({
   baseUrl,
   timeout = "5 seconds",
 }: DestinationOptions) {
+  const origin = yield* validateBaseUrl(baseUrl)
   const client = yield* HttpClient.HttpClient
   const credentials = yield* CredentialProvider
-  const origin = normalizeBaseUrl(baseUrl)
 
   const execute = Effect.fn("Destination.execute")(function* <A>(
     request: HttpClientRequest.HttpClientRequest,
     schema: Schema.Codec<A, unknown, never, unknown>,
   ) {
-    const response = yield* client.execute(HttpClientRequest.acceptJson(request)).pipe(
-      Effect.mapError(() => new DestinationUnavailable({ reason: "request failed" })),
+    return yield* Effect.gen(function* () {
+      const response = yield* client
+        .execute(HttpClientRequest.acceptJson(request))
+        .pipe(Effect.mapError(() => new DestinationUnavailable({ reason: "request failed" })))
+      if (response.status < 200 || response.status >= 300) {
+        return yield* new DestinationRejected({ status: response.status })
+      }
+      return yield* HttpClientResponse.schemaBodyJson(schema)(response).pipe(
+        Effect.mapError(
+          (error) =>
+            new InvalidDestinationResponse({
+              reason: error.message,
+            }),
+        ),
+      )
+    }).pipe(
       Effect.timeoutOrElse({
         duration: timeout,
         orElse: () => Effect.fail(new DestinationUnavailable({ reason: "request timed out" })),
       }),
-    )
-    if (response.status < 200 || response.status >= 300) {
-      return yield* new DestinationRejected({ status: response.status })
-    }
-    return yield* HttpClientResponse.schemaBodyJson(schema)(response).pipe(
-      Effect.mapError(
-        (error) =>
-          new InvalidDestinationResponse({
-            reason: error.message,
-          }),
-      ),
     )
   })
 
@@ -107,49 +137,51 @@ export const make = Effect.fn("Destination.make")(function* ({
       authenticated(HttpClientRequest.put(`${origin}/v1/usage/otel-snapshots`), token),
       batch,
     )
-    return (yield* execute(request, Accepted)).accepted
+    return (yield* execute(request, UsageAcceptedResponse)).accepted
   })
 
   const syncDaily = Effect.fn("Destination.syncDaily")(function* (batch: CcusageDailyBatch) {
     const token = yield* credentials.accessToken()
+    const startBody = {
+      capturedAt: batch.capturedAt,
+      costSnapshotCount: batch.costs.length,
+      deviceId: batch.deviceId,
+      snapshotCount: batch.snapshots.length,
+      source: batch.source,
+      sourceVersion: batch.sourceVersion,
+      timeZone: batch.timeZone,
+    } satisfies DailySyncStartRequest
     const start = yield* withJsonBody(
       authenticated(HttpClientRequest.put(`${origin}/v1/usage-syncs/${batch.syncId}`), token),
-      {
-        capturedAt: batch.capturedAt,
-        costSnapshotCount: batch.costs.length,
-        deviceId: batch.deviceId,
-        snapshotCount: batch.snapshots.length,
-        source: batch.source,
-        sourceVersion: batch.sourceVersion,
-        timeZone: batch.timeZone,
-      },
+      startBody,
     )
-    const started = yield* execute(start, SyncStarted)
+    const started = yield* execute(start, DailySyncStartedResponse)
     if (started.syncId !== batch.syncId) {
       return yield* new InvalidDestinationResponse({
         reason: "start response sync ID does not match request",
       })
     }
 
+    const uploadBody = {
+      costs: batch.costs,
+      snapshots: batch.snapshots,
+      source: batch.source,
+    } satisfies DailySyncUploadRequest
     const snapshots = yield* withJsonBody(
       authenticated(
         HttpClientRequest.put(`${origin}/v1/usage-syncs/${batch.syncId}/snapshots`),
         token,
       ),
-      {
-        costs: batch.costs,
-        snapshots: batch.snapshots,
-        source: batch.source,
-      },
+      uploadBody,
     )
-    yield* execute(snapshots, Accepted)
+    yield* execute(snapshots, UsageAcceptedResponse)
 
     return (yield* execute(
       authenticated(
         HttpClientRequest.post(`${origin}/v1/usage-syncs/${batch.syncId}/commit`),
         token,
       ),
-      SyncCommitted,
+      DailySyncCommittedResponse,
     )).committed
   })
 

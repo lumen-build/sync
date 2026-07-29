@@ -9,14 +9,13 @@ import { resolve } from "node:path"
 import {
   AssertionProvider,
   CredentialProvider,
-  MissingCredential,
   SecretStore,
-  bearerCredentialLayer,
   environmentAssertionLayer,
   fileSecretStoreLayer,
   liveOidcClientLayer,
   localAuthorizationCodeReceiverLayer,
   oidcCredentialLayer,
+  storedBearerCredentialLayer,
 } from "@lumen-build/sync-auth"
 import {
   CcusageAgent,
@@ -74,10 +73,17 @@ import {
   type RuntimeReporter,
 } from "./runtime"
 
-const VERSION = "0.1.0"
+const VERSION = (
+  createRequire(import.meta.url)("../package.json") as {
+    readonly version: string
+  }
+).version
 const environment = process.env as Readonly<Record<string, string | undefined>>
 const platform: RuntimeHost["platform"] =
   process.platform === "win32" ? "win32" : process.platform === "darwin" ? "darwin" : "linux"
+const outboundHttpClientLayer = BunHttpClient.layer.pipe(
+  Layer.provide(Layer.succeed(BunHttpClient.RequestInit)({ redirect: "manual" })),
+)
 
 const root = Command.make("lumen-sync").pipe(
   Command.withSharedFlags({
@@ -115,10 +121,11 @@ const selectedRuntimePaths = Effect.fn("Cli.selectedRuntimePaths")(function* () 
   const parent = yield* root
   const flag = Option.getOrUndefined(parent.config)
   const environmentPath = environment.LUMEN_CONFIG
+  const selected =
+    flag ??
+    (environmentPath === undefined || environmentPath.length === 0 ? undefined : environmentPath)
   return resolveRuntimePaths({
-    configPath:
-      flag ??
-      (environmentPath === undefined || environmentPath.length === 0 ? undefined : environmentPath),
+    configPath: selected === undefined ? undefined : resolve(selected),
     host: runtimeHost(),
   })
 })
@@ -163,22 +170,22 @@ const credentialLayer = (
     const auth = yield* requireAuth(config)
     if (auth.mode === "bearer") {
       const token = environment.LUMEN_BEARER_TOKEN
-      return bearerCredentialLayer({
-        token:
-          token === undefined || token.length === 0
-            ? Effect.fail(new MissingCredential({ source: "LUMEN_BEARER_TOKEN" }))
-            : Effect.succeed(Redacted.make(token)),
-      })
+      return storedBearerCredentialLayer({
+        token: Effect.succeed(
+          token === undefined || token.length === 0 ? undefined : Redacted.make(token),
+        ),
+      }).pipe(
+        Layer.provide(fileSecretStoreLayer(paths.credentialsFile)),
+      ) as Layer.Layer<CredentialProvider>
     }
 
     const receiver = localAuthorizationCodeReceiverLayer({ platform })
-    const httpClient = BunHttpClient.layer
+    const httpClient = outboundHttpClientLayer
     const assertions = environmentAssertionLayer(environment).pipe(Layer.provide(httpClient))
     const secrets = fileSecretStoreLayer(paths.credentialsFile)
     const oidc = liveOidcClientLayer.pipe(Layer.provide(Layer.merge(receiver, httpClient)))
     return oidcCredentialLayer({
       config: auth.oidc,
-      credentialKeyPrefix: "lumen.sync",
     }).pipe(
       Layer.provide(
         Layer.mergeAll(assertions, secrets, oidc) as Layer.Layer<
@@ -195,7 +202,7 @@ const configuredDestinationLayer = Effect.fn("Cli.destinationLayer")(function* (
   const destination = yield* requireDestination(config)
   const credentials = yield* credentialLayer(config, paths)
   return destinationLayer({ baseUrl: destination.baseUrl }).pipe(
-    Layer.provide(Layer.merge(BunHttpClient.layer, credentials)),
+    Layer.provide(Layer.merge(outboundHttpClientLayer, credentials)),
   )
 })
 
@@ -340,6 +347,19 @@ const configuredHarnessPaths = (runtimePaths: RuntimePaths) => ({
   ownership: runtimePaths.harnessOwnershipFile,
 })
 
+const collectorUrlForHarness = (
+  configuration: Configuration,
+  harness: Harness,
+): Effect.Effect<string, import("@lumen-build/sync-config").MissingConfiguration> =>
+  harness === "copilot"
+    ? Effect.succeed("")
+    : requireCollector(configuration).pipe(Effect.map(({ listenUrl }) => listenUrl))
+
+const requiredEnvironmentText = (required: Readonly<Record<string, string>>): string =>
+  Object.entries(required)
+    .map(([name, value]) => `${name}=${value}`)
+    .join(", ")
+
 const harnessListCommand = Command.make("list", {}, () =>
   output(
     "harness.list",
@@ -363,31 +383,28 @@ const harnessConfigureCommand = Command.make(
   ({ agent, force }) =>
     Effect.gen(function* () {
       const service = yield* configurationService()
-      const collector = yield* requireCollector(service.configuration)
       const paths = configuredHarnessPaths(service.paths)
       for (const harness of selectedHarnesses(agent)) {
         const result = yield* configureHarness({
-          collectorUrl: collector.listenUrl,
+          collectorUrl: yield* collectorUrlForHarness(service.configuration, harness),
+          environment,
           force,
           harness,
           paths,
         })
-        const status = yield* inspectHarness({
-          collectorUrl: collector.listenUrl,
-          harness,
-          paths,
-        })
+        const environmentHint = requiredEnvironmentText(result.environment)
         yield* output(
           "harness.configure",
           "result",
           {
             changed: result.changes.map((change) => change.path.join(".")),
+            environment: result.environment,
             harness,
-            path: paths.configurations[harness],
+            path: result.status.path,
             previousState: result.state,
-            state: status.state,
+            state: result.status.state,
           },
-          `${harness}: ${status.state}`,
+          `${harness}: ${result.status.state}${environmentHint.length === 0 ? "" : `; required environment: ${environmentHint}`}`,
         )
       }
     }),
@@ -396,18 +413,21 @@ const harnessConfigureCommand = Command.make(
 const harnessStatusCommand = Command.make("status", { agent: harnessSelectionFlag }, ({ agent }) =>
   Effect.gen(function* () {
     const service = yield* configurationService()
-    const collector = yield* requireCollector(service.configuration)
     const paths = configuredHarnessPaths(service.paths)
     for (const harness of selectedHarnesses(agent)) {
       const status = yield* inspectHarness({
-        collectorUrl: collector.listenUrl,
+        collectorUrl: yield* collectorUrlForHarness(service.configuration, harness),
+        environment,
         harness,
         paths,
       })
       yield* output(
         "harness.status",
         "result",
-        { ...status, descriptor: harnessRegistry[harness] },
+        {
+          ...status,
+          descriptor: harnessRegistry[harness],
+        },
         `${harness}: ${status.state}${status.managed ? " (managed)" : ""}`,
       )
     }
@@ -703,6 +723,7 @@ const doctorCommand = Command.make("doctor", {}, () =>
       const statuses = yield* Effect.forEach(harnessChoice, (harness) =>
         inspectHarness({
           collectorUrl: collector.listenUrl,
+          environment,
           harness,
           paths,
         }),

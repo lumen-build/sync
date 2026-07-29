@@ -3,12 +3,15 @@
 import { Context, Effect, Schema } from "effect"
 
 import { prepareConfiguration, prepareRemoval } from "./configuration"
+import { inspectHarnessEnvironment, type HarnessEnvironmentInspection } from "./environment"
 import {
   Harness,
   HarnessConfigurationConflict,
   ManagedChange,
+  harnessRegistry,
   managedPathKey,
   type HarnessStatus,
+  type HarnessStatusState,
 } from "./model"
 import type { HarnessPaths } from "./paths"
 
@@ -102,17 +105,104 @@ const validateOwnership = (
 
 export interface ConfigureHarnessInput {
   readonly collectorUrl: string
+  readonly environment?: Readonly<Record<string, string | undefined>>
   readonly force: boolean
   readonly harness: Harness
   readonly paths: HarnessPaths
 }
 
+export interface HarnessInspection extends HarnessStatus {
+  readonly environment: Readonly<Record<string, string>>
+}
+
+const environmentInspection = (
+  collectorUrl: string,
+  environment: Readonly<Record<string, string | undefined>>,
+  harness: Harness,
+  paths: HarnessPaths,
+): HarnessEnvironmentInspection =>
+  inspectHarnessEnvironment(
+    harness,
+    {
+      collectorUrl,
+      copilotTelemetryPath: paths.telemetry.copilot,
+    },
+    environment,
+  )
+
+const environmentReason = (inspection: HarnessEnvironmentInspection): string | undefined => {
+  const reason = [...inspection.conflicting, ...inspection.missing].join(", ")
+  return reason.length === 0 ? undefined : reason
+}
+
+const combineHarnessState = (
+  file: HarnessStatusState,
+  environment: Exclude<HarnessStatusState, "unreadable">,
+): HarnessStatusState => {
+  if (file === "unreadable" || file === "conflicting") return file
+  if (environment === "conflicting") return "conflicting"
+  if (file === "exact" && environment === "exact") return "exact"
+  if (file === "missing" && environment === "missing") return "missing"
+  return "partial"
+}
+
+const environmentStatus = (
+  harness: Harness,
+  inspection: HarnessEnvironmentInspection,
+): HarnessInspection => {
+  const reason = environmentReason(inspection)
+  return {
+    harness,
+    environment: inspection.required,
+    managed: false,
+    path: "environment",
+    ...(reason === undefined ? {} : { reason }),
+    state: inspection.state,
+  }
+}
+
+const combinedStatus = (
+  file: HarnessStatus,
+  inspection: HarnessEnvironmentInspection,
+): HarnessInspection => {
+  const environmentFailure = environmentReason(inspection)
+  return {
+    ...file,
+    environment: inspection.required,
+    ...(environmentFailure === undefined
+      ? {}
+      : {
+          reason:
+            file.reason === undefined
+              ? environmentFailure
+              : `${file.reason}; ${environmentFailure}`,
+        }),
+    state:
+      Object.keys(inspection.required).length === 0
+        ? file.state
+        : combineHarnessState(file.state, inspection.state),
+  }
+}
+
 export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function* ({
   collectorUrl,
+  environment = {},
   force,
   harness,
   paths,
 }: ConfigureHarnessInput) {
+  const inspectedEnvironment = environmentInspection(collectorUrl, environment, harness, paths)
+  if (harnessRegistry[harness].format === "environment") {
+    const status = environmentStatus(harness, inspectedEnvironment)
+    return {
+      changes: [],
+      contents: "",
+      environment: inspectedEnvironment.required,
+      state: inspectedEnvironment.state,
+      status,
+    }
+  }
+
   const files = yield* HarnessFileSystem
   const path = paths.configurations[harness]
   const [snapshot, ownership] = yield* Effect.all([
@@ -127,10 +217,24 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
     force,
     harness,
   })
-  if (prepared.changes.length === 0) return prepared
+  const previousRecord = ownership.records.find((candidate) => candidate.harness === harness)
+  if (prepared.changes.length === 0) {
+    return {
+      ...prepared,
+      environment: inspectedEnvironment.required,
+      status: combinedStatus(
+        {
+          harness,
+          managed: previousRecord !== undefined,
+          path,
+          state: "exact",
+        },
+        inspectedEnvironment,
+      ),
+    }
+  }
 
   yield* files.writeAtomic(path, prepared.contents, snapshot?.mode ?? 0o600)
-  const previousRecord = ownership.records.find((candidate) => candidate.harness === harness)
   const changesByPath = new Map(
     prepared.changes.map((change) => [managedPathKey(change.path), change]),
   )
@@ -161,7 +265,19 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
       ).pipe(Effect.andThen(Effect.fail(error))),
     ),
   )
-  return prepared
+  return {
+    ...prepared,
+    environment: inspectedEnvironment.required,
+    status: combinedStatus(
+      {
+        harness,
+        managed: true,
+        path,
+        state: "exact",
+      },
+      inspectedEnvironment,
+    ),
+  }
 })
 
 export interface RemoveHarnessInput {
@@ -173,6 +289,9 @@ export const removeHarness = Effect.fn("HarnessLifecycle.remove")(function* ({
   harness,
   paths,
 }: RemoveHarnessInput) {
+  if (harnessRegistry[harness].format === "environment") {
+    return { preserved: [], restored: [] }
+  }
   const files = yield* HarnessFileSystem
   const ownership = yield* readOwnership(files, paths.ownership)
   yield* validateOwnership(ownership, paths)
@@ -208,15 +327,16 @@ export const removeHarness = Effect.fn("HarnessLifecycle.remove")(function* ({
 
 export interface InspectHarnessInput {
   readonly collectorUrl: string
+  readonly environment?: Readonly<Record<string, string | undefined>>
   readonly harness: Harness
   readonly paths: HarnessPaths
 }
 
-export const inspectHarness = Effect.fn("HarnessLifecycle.inspect")(function* ({
+const inspectFileHarness = Effect.fn("HarnessLifecycle.inspectFile")(function* ({
   collectorUrl,
   harness,
   paths,
-}: InspectHarnessInput) {
+}: Omit<InspectHarnessInput, "environment">) {
   const files = yield* HarnessFileSystem
   const path = paths.configurations[harness]
   const fileResult = yield* Effect.result(files.readOptional(path))
@@ -281,4 +401,20 @@ export const inspectHarness = Effect.fn("HarnessLifecycle.inspect")(function* ({
     path,
     state: prepared.success.state,
   } satisfies HarnessStatus
+})
+
+export const inspectHarness = Effect.fn("HarnessLifecycle.inspect")(function* ({
+  collectorUrl,
+  environment = {},
+  harness,
+  paths,
+}: InspectHarnessInput) {
+  const inspectedEnvironment = environmentInspection(collectorUrl, environment, harness, paths)
+  if (harnessRegistry[harness].format === "environment") {
+    return environmentStatus(harness, inspectedEnvironment)
+  }
+  return combinedStatus(
+    yield* inspectFileHarness({ collectorUrl, harness, paths }),
+    inspectedEnvironment,
+  )
 })

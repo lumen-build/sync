@@ -17,7 +17,7 @@ export const HarnessIntegration = Schema.Literals(["native-otel", "opencode-plug
 
 export type HarnessIntegration = typeof HarnessIntegration.Type
 
-export const HarnessConfigurationFormat = Schema.Literals(["jsonc", "toml"])
+export const HarnessConfigurationFormat = Schema.Literals(["environment", "jsonc", "toml"])
 
 export type HarnessConfigurationFormat = typeof HarnessConfigurationFormat.Type
 
@@ -46,7 +46,7 @@ export const harnessRegistry: Readonly<Record<Harness, HarnessDescriptor>> = {
   },
   copilot: {
     displayName: "GitHub Copilot CLI",
-    format: "jsonc",
+    format: "environment",
     id: "copilot",
     integration: "native-otel",
     signals: ["metrics"],
@@ -119,6 +119,16 @@ export const managedValuesEqual = (left: ManagedValue, right: ManagedValue): boo
 }
 
 export type ConfigurationState = "conflicting" | "exact" | "missing" | "partial"
+
+export const configurationState = (
+  changes: number,
+  conflicts: number,
+  total: number,
+): ConfigurationState => {
+  if (conflicts > 0) return "conflicting"
+  if (changes === 0) return "exact"
+  return changes === total ? "missing" : "partial"
+}
 
 export interface PreparedConfiguration {
   readonly changes: ReadonlyArray<ManagedChange>

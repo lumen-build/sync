@@ -16,6 +16,9 @@ Configuration is resolved in this order:
 Bearer tokens and CI assertions are read from the environment and are never
 written to TOML. OIDC refresh tokens, the generated device identity, collector
 checkpoints, and daily-sync journals are stored in mode-`0600` files.
+Running `auth login` in bearer mode copies the current environment token into
+that private credential store for background-service use; `auth logout` removes
+it.
 
 ## Platform paths
 
@@ -38,52 +41,67 @@ Every key is shown below. The OIDC table is required only when `auth.mode` is
 listen_url = "http://127.0.0.1:4318"
 
 [destination]
-base_url = "https://receiver.example"
+base_url = "https://usage.lumen.build"
 
 [auth]
 mode = "oidc" # bearer | oidc
 
 [auth.oidc]
-issuer = "https://identity.example"
+issuer = "https://identity.lumen.build"
 client_id = "lumen-sync"
-audience = "https://receiver.example" # optional
+audience = "https://usage.lumen.build" # optional
 redirect_uri = "http://127.0.0.1:9876/callback"
 scopes = ["openid", "offline_access"]
 validation = "jwks" # jwks | introspection
 ```
 
+The `lumen.build` URLs above are illustrative and fully mocked by this
+repository's tests. They are not package defaults or hosted services.
+
 `collector.listen_url` must be an explicit HTTP loopback URL. Destination,
 issuer, and redirect URLs require HTTPS unless they are loopback URLs for local
-development and tests.
+development and tests. OIDC discovery applies the same rule to every advertised
+authorization, token, JWKS, introspection, and revocation endpoint. Refresh
+tokens are isolated by canonical issuer, client ID, and audience.
 
 ## Environment variables
 
-| Variable                        | Purpose                                           | Format                                                        |
-| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------- |
-| `LUMEN_CONFIG`                  | Configuration file override                       | Absolute or working-directory-relative path ending in `.toml` |
-| `LUMEN_COLLECTOR_LISTEN_URL`    | Override `collector.listen_url`                   | HTTP loopback URL                                             |
-| `LUMEN_DESTINATION_BASE_URL`    | Override `destination.base_url`                   | HTTPS URL or HTTP loopback URL                                |
-| `LUMEN_AUTH_MODE`               | Override `auth.mode`                              | `bearer` or `oidc`                                            |
-| `LUMEN_BEARER_TOKEN`            | Receiver token for bearer mode                    | Non-empty secret                                              |
-| `LUMEN_OIDC_ISSUER`             | Override `auth.oidc.issuer`                       | HTTPS URL or HTTP loopback URL                                |
-| `LUMEN_OIDC_CLIENT_ID`          | Override `auth.oidc.client_id`                    | Non-empty string                                              |
-| `LUMEN_OIDC_AUDIENCE`           | Override optional `auth.oidc.audience`            | Provider-defined audience                                     |
-| `LUMEN_OIDC_REDIRECT_URI`       | Override `auth.oidc.redirect_uri`                 | HTTPS URL or HTTP loopback URL                                |
-| `LUMEN_OIDC_SCOPES`             | Override `auth.oidc.scopes`                       | Comma-separated scopes                                        |
-| `LUMEN_OIDC_VALIDATION`         | Override `auth.oidc.validation`                   | `jwks` or `introspection`                                     |
-| `LUMEN_OIDC_ASSERTION`          | Explicit CI workload assertion                    | JWT or provider-defined assertion                             |
-| `LUMEN_DEVICE_ID`               | Override the persisted installation identity      | Version-4 UUID                                                |
-| `LUMEN_EXECUTABLE_PATH`         | Native executable used in generated user services | Absolute executable path                                      |
-| `LUMEN_COLLECTOR_OTLP_ENDPOINT` | Explicit OpenCode plugin collector endpoint       | OTLP base URL                                                 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`   | OpenCode plugin fallback endpoint                 | OTLP base URL                                                 |
+| Variable                                             | Purpose                                           | Format                                                      |
+| ---------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------- |
+| `LUMEN_CONFIG`                                       | Configuration file override                       | Absolute or working-directory-relative path containing TOML |
+| `LUMEN_COLLECTOR_LISTEN_URL`                         | Override `collector.listen_url`                   | HTTP loopback URL                                           |
+| `LUMEN_DESTINATION_BASE_URL`                         | Override `destination.base_url`                   | HTTPS URL or HTTP loopback URL                              |
+| `LUMEN_AUTH_MODE`                                    | Override `auth.mode`                              | `bearer` or `oidc`                                          |
+| `LUMEN_BEARER_TOKEN`                                 | Bearer override and `auth login` input            | Non-empty secret                                            |
+| `LUMEN_OIDC_ISSUER`                                  | Override `auth.oidc.issuer`                       | HTTPS URL or HTTP loopback URL                              |
+| `LUMEN_OIDC_CLIENT_ID`                               | Override `auth.oidc.client_id`                    | Non-empty string                                            |
+| `LUMEN_OIDC_AUDIENCE`                                | Override optional `auth.oidc.audience`            | Provider-defined audience                                   |
+| `LUMEN_OIDC_REDIRECT_URI`                            | Override `auth.oidc.redirect_uri`                 | HTTPS URL or HTTP loopback URL                              |
+| `LUMEN_OIDC_SCOPES`                                  | Override `auth.oidc.scopes`                       | Comma-separated scopes                                      |
+| `LUMEN_OIDC_VALIDATION`                              | Override `auth.oidc.validation`                   | `jwks` or `introspection`                                   |
+| `LUMEN_OIDC_ASSERTION`                               | Explicit CI workload assertion                    | JWT or provider-defined assertion                           |
+| `LUMEN_DEVICE_ID`                                    | Override the persisted installation identity      | Version-4 UUID                                              |
+| `LUMEN_EXECUTABLE_PATH`                              | Native executable used in generated user services | Absolute executable path                                    |
+| `LUMEN_COLLECTOR_OTLP_ENDPOINT`                      | Explicit OpenCode plugin collector endpoint       | OTLP base URL                                               |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`                        | OpenCode plugin fallback endpoint                 | OTLP base URL                                               |
+| `COPILOT_OTEL_ENABLED`                               | Enable GitHub Copilot CLI telemetry               | `true`                                                      |
+| `COPILOT_OTEL_EXPORTER_TYPE`                         | Select the reproducible local Copilot path        | `file`                                                      |
+| `COPILOT_OTEL_FILE_EXPORTER_PATH`                    | Copilot JSON-lines file read by ccusage           | Platform path printed by `harness configure`                |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | Keep Copilot prompt and response content disabled | `false`                                                     |
+| `OTEL_SERVICE_NAME`                                  | Identify Copilot telemetry                        | `github-copilot`                                            |
 
 `LUMEN_OIDC_ASSERTION` takes precedence over automatically detected CI
 assertions. Without it, OIDC supports GitHub Actions OIDC, GitLab CI JWT, and
 CircleCI OIDC environments.
 
-The OpenCode endpoint variables affect only the package plugin. The managed
-Claude, Codex, Copilot, Gemini, and VS Code settings are written by
-`lumen-sync harness configure`.
+The OpenCode endpoint variables affect only the package plugin. Managed Claude,
+Codex, Gemini, and VS Code settings are written by `lumen-sync harness
+configure`. Copilot's supported telemetry controls are environment variables;
+the command reports their platform-correct values and does not write
+enterprise-only keys to Copilot user settings. Its file path is consumed by
+`sync daily --agent copilot` through ccusage. Direct Copilot OTLP requires an
+operator-supplied HTTPS ingress because the CLI refuses cleartext HTTP
+exporters.
 
 ## Inspection and automation
 

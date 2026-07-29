@@ -77,6 +77,42 @@ it.effect("rejects unknown keys and non-loopback plaintext endpoints", () =>
   }),
 )
 
+it.effect("rejects credentials embedded in destination and OIDC URLs", () =>
+  Effect.gen(function* () {
+    const inputs = [
+      {
+        auth: {
+          mode: "oidc",
+          oidc: {
+            client_id: "client",
+            issuer: "https://user:password@identity.lumen.build",
+            redirect_uri: "http://127.0.0.1:9876/callback",
+            scopes: ["openid"],
+            validation: "jwks",
+          },
+        },
+      },
+      {
+        auth: {
+          mode: "oidc",
+          oidc: {
+            client_id: "client",
+            issuer: "https://identity.lumen.build",
+            redirect_uri: "http://user:password@127.0.0.1:9876/callback",
+            scopes: ["openid"],
+            validation: "jwks",
+          },
+        },
+      },
+      { destination: { base_url: "https://user:password@usage.lumen.build" } },
+    ]
+
+    for (const input of inputs) {
+      expect(yield* Effect.flip(decode(input))).toBeInstanceOf(InvalidConfiguration)
+    }
+  }),
+)
+
 it.effect("accepts collector listen URLs at the origin root", () =>
   Effect.gen(function* () {
     for (const listenUrl of ["http://127.0.0.1:4318", "http://localhost:4318/"]) {
@@ -190,6 +226,26 @@ it.effect("lets environment variables override TOML without accepting secrets in
   }),
 )
 
+it.effect("rejects credentialed URL environment overrides", () =>
+  Effect.gen(function* () {
+    for (const environment of [
+      { LUMEN_DESTINATION_BASE_URL: "https://user:password@usage.lumen.build" },
+      {
+        LUMEN_AUTH_MODE: "oidc",
+        LUMEN_OIDC_CLIENT_ID: "client",
+        LUMEN_OIDC_ISSUER: "https://user:password@identity.lumen.build",
+        LUMEN_OIDC_REDIRECT_URI: "http://127.0.0.1:9876/callback",
+        LUMEN_OIDC_SCOPES: "openid",
+        LUMEN_OIDC_VALIDATION: "jwks",
+      },
+    ]) {
+      expect(yield* Effect.flip(decodeWithEnvironment({}, environment))).toBeInstanceOf(
+        InvalidConfiguration,
+      )
+    }
+  }),
+)
+
 it("uses XDG on Unix and APPDATA on Windows", () => {
   expect(
     resolveConfigPath({
@@ -246,6 +302,30 @@ it("separates default state and data while isolating explicit configuration", ()
     harnessOwnershipFile: "/tmp/lumen/harness-ownership.json",
     serviceStateDirectory: "/tmp/lumen/state/service",
     stateDirectory: "/tmp/lumen/state",
+  })
+
+  expect(
+    resolveRuntimePaths({
+      configPath: "config.toml",
+      host: { homeDirectory: "/home/dev", platform: "linux" },
+    }),
+  ).toMatchObject({
+    configDirectory: ".",
+    configFile: "config.toml",
+    credentialsFile: "./credentials.json",
+    stateDirectory: "./state",
+  })
+
+  expect(
+    resolveRuntimePaths({
+      configPath: "config.toml",
+      host: { homeDirectory: "C:\\Users\\dev", platform: "win32" },
+    }),
+  ).toMatchObject({
+    configDirectory: ".",
+    configFile: "config.toml",
+    credentialsFile: ".\\credentials.json",
+    stateDirectory: ".\\state",
   })
 })
 

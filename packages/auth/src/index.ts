@@ -3,12 +3,15 @@ export {
   CredentialProvider,
   bearerCredentialLayer,
   oidcCredentialLayer,
+  oidcRefreshTokenKey,
+  storedBearerCredentialLayer,
 } from "./credential-provider.js"
 export type {
   BearerOptions,
   CredentialError,
   Interface as CredentialProviderInterface,
   OidcOptions,
+  StoredBearerOptions,
 } from "./credential-provider.js"
 export { AssertionProvider, OidcClient, SecretStore } from "./ports.js"
 export type {

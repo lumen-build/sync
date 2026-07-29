@@ -3,14 +3,16 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
+import { CcusageAgent } from "@lumen-build/sync-ccusage"
 import { Duration, Effect, Schema } from "effect"
 
+import type { AimockCompletionRequest } from "./harness-interaction.js"
 import { definedEnvironment, type PackedCli } from "./packed-cli.js"
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..")
 const fixtureDirectory = join(repositoryRoot, "packages", "sync", "e2e", "fixtures", "harness")
 
-export const HarnessAgent = Schema.Literals(["claude", "codex", "gemini", "opencode"])
+export const HarnessAgent = CcusageAgent
 export type HarnessAgent = typeof HarnessAgent.Type
 
 export class HarnessE2eError extends Schema.TaggedErrorClass<HarnessE2eError>()("HarnessE2eError", {
@@ -38,6 +40,21 @@ export const runExternal = Effect.fn("E2E.Harness.runExternal")(function* (
     readonly timeout?: Duration.Input
   },
 ) {
+  const debug = process.env.LUMEN_HARNESS_DEBUG === "1"
+  const captured = (
+    stream: ReadableStream<Uint8Array>,
+    destination: { readonly write: (chunk: Uint8Array) => unknown },
+  ): Promise<string> =>
+    new Response(
+      stream.pipeThrough(
+        new TransformStream({
+          transform(chunk, controller) {
+            if (debug) destination.write(chunk)
+            controller.enqueue(chunk)
+          },
+        }),
+      ),
+    ).text()
   const child = yield* Effect.acquireRelease(
     Effect.try({
       try: () =>
@@ -60,8 +77,8 @@ export const runExternal = Effect.fn("E2E.Harness.runExternal")(function* (
     try: async () => {
       const [exitCode, stderr, stdout] = await Promise.all([
         child.exited,
-        new Response(child.stderr).text(),
-        new Response(child.stdout).text(),
+        captured(child.stderr, process.stderr),
+        captured(child.stdout, process.stdout),
       ])
       return { exitCode, stderr, stdout }
     },
@@ -145,6 +162,7 @@ export const harnessDependencies = Effect.acquireRelease(
         executable: {
           claude: join(nodeModules, ".bin", "claude"),
           codex: join(nodeModules, ".bin", "codex"),
+          copilot: join(nodeModules, ".bin", "copilot"),
           gemini: join(nodeModules, ".bin", "gemini"),
           opencode: join(nodeModules, ".bin", "opencode"),
         },
@@ -175,7 +193,7 @@ interface AimockInstance {
   readonly getRequests: () => ReadonlyArray<AimockJournalEntry>
   readonly onMessage: (
     pattern: string | RegExp,
-    response: unknown,
+    response: (request: AimockCompletionRequest) => unknown,
     options?: Readonly<Record<string, unknown>>,
   ) => AimockInstance
   readonly start: () => Promise<string>
@@ -188,11 +206,16 @@ interface AimockModule {
 }
 
 export interface Aimock {
+  readonly completions: Effect.Effect<ReadonlyArray<AimockCompletionRequest>>
   readonly requests: Effect.Effect<ReadonlyArray<AimockJournalEntry>>
   readonly url: string
 }
 
-export const aimock = (dependencies: HarnessDependencies, canary: string, response: unknown) =>
+export const aimock = (
+  dependencies: HarnessDependencies,
+  canary: string,
+  response: (request: AimockCompletionRequest) => unknown,
+) =>
   Effect.acquireRelease(
     Effect.gen(function* () {
       const entry = join(
@@ -213,7 +236,11 @@ export const aimock = (dependencies: HarnessDependencies, canary: string, respon
         port: 0,
         strict: true,
       })
-      mock.onMessage(canary, response)
+      const completions: Array<AimockCompletionRequest> = []
+      mock.onMessage(canary, (request) => {
+        completions.push(request)
+        return response(request)
+      })
       yield* Effect.tryPromise({
         try: () => mock.start(),
         catch: (cause) => failure("start aimock", cause),
@@ -221,6 +248,7 @@ export const aimock = (dependencies: HarnessDependencies, canary: string, respon
       return {
         mock,
         public: {
+          completions: Effect.sync(() => [...completions]),
           requests: Effect.sync(() => mock.getRequests()),
           url: mock.url,
         } satisfies Aimock,
@@ -249,6 +277,12 @@ export const loopbackPort = Effect.acquireUseRelease(
 export const readJsonFile = <A = unknown>(path: string): Effect.Effect<A, HarnessE2eError> =>
   Effect.tryPromise({
     try: async () => JSON.parse(await readFile(path, "utf8")) as A,
+    catch: (cause) => failure(`read ${path}`, cause),
+  })
+
+export const readTextFile = (path: string): Effect.Effect<string, HarnessE2eError> =>
+  Effect.tryPromise({
+    try: () => readFile(path, "utf8"),
     catch: (cause) => failure(`read ${path}`, cause),
   })
 

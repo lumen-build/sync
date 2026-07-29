@@ -386,12 +386,12 @@ const mapCodexMetric = (metric: OtlpMetric): ReadonlyArray<UsageCandidate> => {
 const mapMetrics = (
   metrics: Extract<DecodedTelemetry, { readonly _tag: "Metrics" }>["metrics"],
 ): ReadonlyArray<UsageCandidate> =>
-  metrics.flatMap((metric) => {
+  metrics.flatMap((metric, metricIndex) => {
     if (metric.name === "codex.turn.token_usage") return mapCodexMetric(metric)
     if (metric.temporality === "cumulative") return []
     if (!`${metric.name} ${metric.unit}`.toLowerCase().includes("token")) return []
 
-    return metric.points.flatMap((point) => {
+    return metric.points.flatMap((point, pointIndex) => {
       const attributes = makeAttributes(metric.resourceAttributes, point.attributes)
       const field = tokenField(
         attributes.string(["gen_ai.token.type", "type", "token_type"]) ?? metric.name,
@@ -409,6 +409,7 @@ const mapMetrics = (
           attributes,
           identityHint: metric.name,
           occurredAt: point.timestamp,
+          sourceIdentity: `metric:${metricIndex}:${pointIndex}`,
           sourceName: metric.name,
           sourceSignal: "metrics",
           tokens: tokensFor(field, point.value),

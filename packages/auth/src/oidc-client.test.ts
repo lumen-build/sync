@@ -2,7 +2,7 @@ import type { OidcConfiguration } from "@lumen-build/sync-config"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import type { ServerResponse } from "node:http"
 import { Deferred, Effect, Fiber, Layer, Redacted } from "effect"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { TestClock } from "effect/testing"
 import { it } from "@effect/vitest"
 import { Events, OAuth2Server } from "oauth2-mock-server"
@@ -45,6 +45,9 @@ const configuration = (): OidcConfiguration => ({
 const discoveryDocument = (
   documentIssuer: string,
   overrides: Partial<{
+    readonly authorization_endpoint: string
+    readonly introspection_endpoint: string
+    readonly jwks_uri: string
     readonly revocation_endpoint: string
     readonly token_endpoint: string
   }> = {},
@@ -97,6 +100,47 @@ const buildAssertion = () =>
   })
 
 const runtimeLayer = Layer.merge(BunServices.layer, FetchHttpClient.layer)
+
+it.effect("rejects unsafe configured issuers and discovery endpoints", () =>
+  Effect.gen(function* () {
+    const configured = yield* Effect.flip(discover("https://user:password@identity.lumen.build"))
+    expect(configured).toBeInstanceOf(AuthenticationFailed)
+    expect(configured.reason).toContain("must not contain credentials")
+
+    const base = {
+      authorization_endpoint: "https://identity.lumen.build/authorize",
+      issuer: "https://identity.lumen.build",
+      jwks_uri: "https://identity.lumen.build/jwks",
+      token_endpoint: "https://identity.lumen.build/token",
+    }
+    for (const document of [
+      { ...base, token_endpoint: "http://identity.lumen.build/token" },
+      { ...base, authorization_endpoint: "file:///tmp/authorize" },
+      { ...base, jwks_uri: "https://user:password@identity.lumen.build/jwks" },
+      { ...base, introspection_endpoint: "http://identity.lumen.build/introspect" },
+      { ...base, revocation_endpoint: "https://user:password@identity.lumen.build/revoke" },
+    ]) {
+      const failure = yield* Effect.flip(
+        discover("https://identity.lumen.build").pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(document))),
+            ),
+          ),
+        ),
+      )
+      expect(failure).toBeInstanceOf(AuthenticationFailed)
+    }
+  }).pipe(
+    Effect.provideService(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({}))),
+      ),
+    ),
+  ),
+)
 
 it.layer(runtimeLayer)("OIDC runtime", (runtime) => {
   runtime.effect("preserves the issuer path in the discovery document URL", () =>
@@ -210,6 +254,45 @@ it.layer(runtimeLayer)("OIDC runtime", (runtime) => {
       expect(failure).toBeInstanceOf(AuthenticationFailed)
       expect(failure.operation).toBe("OidcClient.token")
       expect(failure.reason).toBe("timed out after 30 seconds")
+    }).pipe(Effect.provide(liveOidcClientLayer), Effect.provide(receiverLayer)),
+  )
+
+  runtime.effect("does not reflect OAuth error response bodies into failures", () =>
+    Effect.gen(function* () {
+      const errorIssuer = `${issuer}/redacted-token-error`
+      const assertion = "header.synthetic-secret-assertion.signature"
+      server.service.addRoute(
+        "GET",
+        "/redacted-token-error/.well-known/openid-configuration",
+        (_request, response) => {
+          sendJson(
+            response,
+            discoveryDocument(errorIssuer, {
+              token_endpoint: `${issuer}/echo-token-error`,
+            }),
+          )
+        },
+      )
+      server.service.addRoute("POST", "/echo-token-error", (_request, response) => {
+        response.writeHead(400, { "content-type": "application/json" })
+        response.end(
+          JSON.stringify({
+            error: "invalid_grant",
+            error_description: assertion,
+          }),
+        )
+      })
+
+      const client = yield* OidcClient
+      const failure = yield* Effect.flip(
+        client.exchangeAssertion(
+          { ...configuration(), issuer: errorIssuer },
+          Redacted.make(assertion),
+        ),
+      )
+      expect(failure).toBeInstanceOf(AuthenticationFailed)
+      expect(failure.reason).toBe("HTTP 400")
+      expect(failure.reason).not.toContain(assertion)
     }).pipe(Effect.provide(liveOidcClientLayer), Effect.provide(receiverLayer)),
   )
 
@@ -336,6 +419,29 @@ it.layer(runtimeLayer)("OIDC runtime", (runtime) => {
       server.service.once(Events.BeforeIntrospect, (response) => {
         response.body = {
           active: true,
+          aud: "https://other.lumen.build",
+          scope: "usage:write",
+          sub: "user-456",
+        }
+      })
+      const wrongIntrospectionAudience = yield* Effect.gen(function* () {
+        const authenticator = yield* RequestAuthenticator
+        return yield* Effect.flip(authenticator.authenticate(tokens.accessToken))
+      }).pipe(
+        Effect.provide(
+          oidcIntrospectionAuthenticatorLayer({
+            audience: "https://usage.lumen.build",
+            issuer: () => issuer,
+            subjectClaim: "sub",
+          }),
+        ),
+      )
+      expect(wrongIntrospectionAudience).toBeInstanceOf(AuthenticationFailed)
+
+      server.service.once(Events.BeforeIntrospect, (response) => {
+        response.body = {
+          active: true,
+          aud: ["https://usage.lumen.build"],
           scope: "usage:write",
           sub: "user-456",
         }
@@ -346,6 +452,7 @@ it.layer(runtimeLayer)("OIDC runtime", (runtime) => {
       }).pipe(
         Effect.provide(
           oidcIntrospectionAuthenticatorLayer({
+            audience: "https://usage.lumen.build",
             issuer: () => issuer,
             subjectClaim: "sub",
           }),

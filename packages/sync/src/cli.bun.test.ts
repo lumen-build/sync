@@ -153,6 +153,79 @@ test("reports the verified post-write harness state in plain output", async () =
   }
 })
 
+test("reports Copilot's supported environment without writing user telemetry settings", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-copilot-"))
+  try {
+    const configPath = join(home, "config.toml")
+    const collectorUrl = "http://127.0.0.1:4318"
+    await writeFile(configPath, ["[collector]", `listen_url = "${collectorUrl}"`, ""].join("\n"))
+    const telemetryPath = join(home, ".copilot", "otel", "lumen-sync.jsonl")
+    const telemetryNames = new Set([
+      "COPILOT_OTEL_ENABLED",
+      "COPILOT_OTEL_EXPORTER_TYPE",
+      "COPILOT_OTEL_FILE_EXPORTER_PATH",
+      "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
+      "OTEL_SERVICE_NAME",
+    ])
+    const isolated = Object.fromEntries(
+      Object.entries(process.env).filter(([name]) => !telemetryNames.has(name)),
+    )
+    const baseEnvironment = {
+      ...isolated,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+    }
+    const missing = await runCli(
+      ["--config", configPath, "--json", "harness", "configure", "--agent", "copilot"],
+      baseEnvironment,
+    )
+    expect(missing.exitCode).toBe(0)
+    expect(parseEvents(missing.stdout)[0]).toMatchObject({
+      command: "harness.configure",
+      data: {
+        changed: [],
+        environment: {
+          COPILOT_OTEL_ENABLED: "true",
+          COPILOT_OTEL_EXPORTER_TYPE: "file",
+          COPILOT_OTEL_FILE_EXPORTER_PATH: telemetryPath,
+          OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false",
+          OTEL_SERVICE_NAME: "github-copilot",
+        },
+        harness: "copilot",
+        path: "environment",
+        state: "missing",
+      },
+      type: "result",
+    })
+    expect(await Bun.file(join(home, ".copilot", "settings.json")).exists()).toBe(false)
+
+    const exact = await runCli(
+      ["--config", configPath, "--json", "harness", "status", "--agent", "copilot"],
+      {
+        ...baseEnvironment,
+        COPILOT_OTEL_ENABLED: "true",
+        COPILOT_OTEL_EXPORTER_TYPE: "file",
+        COPILOT_OTEL_FILE_EXPORTER_PATH: telemetryPath,
+        OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false",
+        OTEL_SERVICE_NAME: "github-copilot",
+      },
+    )
+    expect(exact.exitCode).toBe(0)
+    expect(parseEvents(exact.stdout)[0]).toMatchObject({
+      command: "harness.status",
+      data: {
+        harness: "copilot",
+        path: "environment",
+        state: "exact",
+      },
+      type: "result",
+    })
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})
+
 test("service status uses Bun plus the absolute CLI script unless explicitly overridden", async () => {
   const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-service-"))
   try {
