@@ -23,6 +23,7 @@ import {
   importerLayer,
 } from "@lumen-build/sync-ccusage"
 import { collectorLayer } from "@lumen-build/sync-collector"
+import { bunCollectorServerLayer } from "@lumen-build/sync-collector/bun"
 import {
   load as loadConfig,
   requireAuth,
@@ -365,14 +366,18 @@ const collectorStartCommand = Command.make(
         maxBodyBytes: 10 * 1024 * 1024,
         statePath: join(dirname(configPath), "state", "collector.json"),
       })
+      const collectorRuntime = Layer.merge(
+        collectorServices,
+        bunCollectorServerLayer.pipe(Layer.provide(collectorServices)),
+      )
       if (localOnly) {
-        return yield* runLocalCollector(address).pipe(Effect.provide(collectorServices))
+        return yield* runLocalCollector(address).pipe(Effect.provide(collectorRuntime))
       }
       const destination = yield* configuredDestinationLayer(config, configPath)
       return yield* runCollector({
         ...address,
         uploadIntervalMilliseconds: uploadInterval * 1_000,
-      }).pipe(Effect.provide(Layer.merge(collectorServices, destination)))
+      }).pipe(Effect.provide(Layer.merge(collectorRuntime, destination)))
     }),
 ).pipe(Command.withDescription("Run the explicit loopback OTLP collector"))
 

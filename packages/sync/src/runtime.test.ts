@@ -2,7 +2,7 @@ import { mkdtemp, readdir, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { Collector, LiveUsageStore } from "@lumen-build/sync-collector"
+import { CollectorServer, LiveUsageStore } from "@lumen-build/sync-collector"
 import { CcusageCommand, importerLayer } from "@lumen-build/sync-ccusage"
 import { Destination, DestinationUnavailable } from "@lumen-build/sync-destination"
 import { expect, it } from "@effect/vitest"
@@ -244,9 +244,9 @@ it.effect("rejects a nonpositive upload interval before starting the collector",
     Effect.provide(
       Layer.mergeAll(
         Layer.succeed(
-          Collector,
-          Collector.of({
-            handle: () => Effect.die("collector should not start"),
+          CollectorServer,
+          CollectorServer.of({
+            listen: () => Effect.die("collector should not start"),
           }),
         ),
         Layer.succeed(

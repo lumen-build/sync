@@ -4,9 +4,9 @@ import {
   CcusageImporter,
   type CcusageAgent,
 } from "@lumen-build/sync-ccusage"
-import { Collector, LiveUsageStore, startServer } from "@lumen-build/sync-collector"
+import { CollectorServer, LiveUsageStore } from "@lumen-build/sync-collector"
 import { Destination } from "@lumen-build/sync-destination"
-import { Console, Effect, Ref, Schema } from "effect"
+import { Clock, Console, Effect, Ref, Schema } from "effect"
 
 export interface DailySyncIdKey {
   readonly agent: CcusageAgent
@@ -117,7 +117,8 @@ const validateUploadInterval = (milliseconds: number) =>
 const uploadLive = Effect.fn("SyncRuntime.uploadLive")(function* (uploadedGeneration: number) {
   const store = yield* LiveUsageStore
   const destination = yield* Destination
-  const snapshot = yield* store.snapshotAfter(new Date().toISOString(), uploadedGeneration)
+  const capturedAt = new Date(yield* Clock.currentTimeMillis).toISOString()
+  const snapshot = yield* store.snapshotAfter(capturedAt, uploadedGeneration)
   if (snapshot === undefined) return undefined
   const { batch, generation } = snapshot
   const accepted = yield* destination.putLive(batch)
@@ -148,16 +149,12 @@ export const runLocalCollector = Effect.fn("SyncRuntime.runLocalCollector")(func
   hostname,
   port,
 }: LocalCollectorRuntimeOptions) {
-  const collector = yield* Collector
-  return yield* Effect.acquireUseRelease(
-    Effect.sync(() => startServer({ collector, hostname, port })),
-    (server) =>
-      Effect.gen(function* () {
-        yield* Console.log(`OTLP collector listening on ${server.url}`)
-        return yield* Effect.never
-      }),
-    (server) => Effect.sync(() => server.stop(true)),
-  )
+  return yield* Effect.gen(function* () {
+    const server = yield* CollectorServer
+    const address = yield* server.listen({ hostname, port })
+    yield* Console.log(`OTLP collector listening on ${address.url}`)
+    return yield* Effect.never
+  }).pipe(Effect.scoped)
 })
 
 export const runCollector = Effect.fn("SyncRuntime.runCollector")(function* ({
@@ -166,16 +163,12 @@ export const runCollector = Effect.fn("SyncRuntime.runCollector")(function* ({
   uploadIntervalMilliseconds,
 }: CollectorRuntimeOptions) {
   yield* validateUploadInterval(uploadIntervalMilliseconds)
-  const collector = yield* Collector
-  return yield* Effect.acquireUseRelease(
-    Effect.sync(() => startServer({ collector, hostname, port })),
-    (server) =>
-      Effect.gen(function* () {
-        yield* Console.log(`OTLP collector listening on ${server.url}`)
-        return yield* runLiveUploads({ uploadIntervalMilliseconds })
-      }),
-    (server) => Effect.sync(() => server.stop(true)),
-  )
+  return yield* Effect.gen(function* () {
+    const server = yield* CollectorServer
+    const address = yield* server.listen({ hostname, port })
+    yield* Console.log(`OTLP collector listening on ${address.url}`)
+    return yield* runLiveUploads({ uploadIntervalMilliseconds })
+  }).pipe(Effect.scoped)
 })
 
 export const parseCollectorAddress = (

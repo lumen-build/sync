@@ -28,7 +28,7 @@ import {
   encodingFromContentType,
   layer as otlpLayer,
 } from "@lumen-build/sync-otlp"
-import { Context, Crypto, Effect, FileSystem, Layer, Path, Ref, Schema } from "effect"
+import { Context, Crypto, Effect, FileSystem, Layer, Path, Ref, Schema, Scope } from "effect"
 
 export interface UsageEvent {
   readonly agent: UsageSnapshot["agent"]
@@ -89,6 +89,33 @@ export interface CollectorInterface {
 
 export class Collector extends Context.Service<Collector, CollectorInterface>()(
   "@lumen-build/sync/Collector",
+) {}
+
+export interface CollectorServerAddress {
+  readonly port: number
+  readonly url: string
+}
+
+export interface CollectorServerOptions {
+  readonly hostname: string
+  readonly port: number
+}
+
+export class CollectorServerError extends Schema.TaggedErrorClass<CollectorServerError>()(
+  "CollectorServerError",
+  {
+    reason: Schema.String,
+  },
+) {}
+
+export interface CollectorServerInterface {
+  readonly listen: (
+    options: CollectorServerOptions,
+  ) => Effect.Effect<CollectorServerAddress, CollectorServerError, Scope.Scope>
+}
+
+export class CollectorServer extends Context.Service<CollectorServer, CollectorServerInterface>()(
+  "@lumen-build/sync/CollectorServer",
 ) {}
 
 const normalizeName = (name: string): string => name.replace(/[-.\s]/g, "_").toLowerCase()
@@ -1107,16 +1134,3 @@ export function collectorLayer({
     makeCollectorLayer(maxBodyBytes).pipe(Layer.provide(dependencies)),
   )
 }
-
-export interface ServerOptions {
-  readonly collector: CollectorInterface
-  readonly hostname: string
-  readonly port: number
-}
-
-export const startServer = ({ collector, hostname, port }: ServerOptions): Bun.Server<undefined> =>
-  Bun.serve({
-    fetch: (request) => Effect.runPromise(collector.handle(request)),
-    hostname,
-    port,
-  })
