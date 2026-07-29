@@ -9,7 +9,7 @@
   "scripts": {
     "build": "turbo run build",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run effect:diagnostics && bun run test",
-    "effect:diagnostics": "effect-tsgo diagnostics --project tsconfig.json --severity error --format pretty",
+    "effect:diagnostics": "node scripts/effect-diagnostics.mjs",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
