@@ -1,6 +1,21 @@
-import type { OtelLiveBatch, UsageSnapshot, UsageTokens } from "@lumen-build/sync-contracts"
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
+
+import type {
+  OtelLiveBatch,
+  OtelUsageSnapshot,
+  UsageSnapshot,
+  UsageTokens,
+} from "@lumen-build/sync-contracts"
 import {
+  DeviceId,
+  NonNegativeSafeInteger,
   OtelLiveBatch as OtelLiveBatchSchema,
+  OtelUsageSnapshot as OtelUsageSnapshotSchema,
+  UsageDay,
+  UsageAgent as UsageAgentSchema,
+  UsageTokens as UsageTokensSchema,
+  UtcTimestamp,
   addUsageTokens,
   defaultProviderForAgent,
   emptyUsageTokens,
@@ -54,9 +69,17 @@ export class UsageNormalizer extends Context.Service<UsageNormalizer, UsageNorma
 ) {}
 
 export interface LiveUsageStoreInterface {
+  readonly checkpoint: Effect.Effect<void, LiveUsageStoreError>
   readonly generation: Effect.Effect<number>
-  readonly ingest: (events: ReadonlyArray<UsageEvent>) => Effect.Effect<number>
+  readonly ingest: (events: ReadonlyArray<UsageEvent>) => Effect.Effect<number, LiveUsageStoreError>
   readonly snapshot: (capturedAt: string) => Effect.Effect<OtelLiveBatch, LiveUsageStoreError>
+  readonly snapshotAfter: (
+    capturedAt: string,
+    generation: number,
+  ) => Effect.Effect<
+    { readonly batch: OtelLiveBatch; readonly generation: number } | undefined,
+    LiveUsageStoreError
+  >
 }
 
 export class LiveUsageStore extends Context.Service<LiveUsageStore, LiveUsageStoreInterface>()(
@@ -106,11 +129,11 @@ const makeAttributes = (
     number: (names) => {
       const value = exact(names)
       if (typeof value === "number" && Number.isFinite(value)) {
-        return Math.max(0, Math.trunc(value))
+        return value
       }
       if (typeof value !== "string" || value.trim() === "") return undefined
       const parsed = Number(value)
-      return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : undefined
+      return Number.isFinite(parsed) ? parsed : undefined
     },
     string: (names) => {
       const value = exact(names)
@@ -199,12 +222,12 @@ const extractTokens = (attributes: Attributes): UsageTokens => ({
 })
 
 const tokensPresent = (tokens: UsageTokens): boolean =>
-  tokens.cacheCreationInput > 0 ||
-  tokens.cacheReadInput > 0 ||
-  tokens.input > 0 ||
-  tokens.output > 0 ||
-  tokens.reasoningOutput > 0 ||
-  tokens.tool > 0
+  tokens.cacheCreationInput !== 0 ||
+  tokens.cacheReadInput !== 0 ||
+  tokens.input !== 0 ||
+  tokens.output !== 0 ||
+  tokens.reasoningOutput !== 0 ||
+  tokens.tool !== 0
 
 type TokenField = keyof UsageTokens
 
@@ -229,7 +252,7 @@ const tokenField = (tokenType: string): TokenField | undefined => {
 
 const tokensFor = (field: TokenField, value: number): UsageTokens => ({
   ...emptyUsageTokens(),
-  [field]: Math.max(0, Math.trunc(value)),
+  [field]: value,
 })
 
 interface UsageCandidate extends Omit<UsageEvent, "fingerprint"> {}
@@ -289,7 +312,7 @@ const mapCodexMetric = (metric: OtlpMetric): ReadonlyArray<UsageCandidate> => {
   for (const point of metric.points) {
     const attributes = makeAttributes(metric.resourceAttributes, point.attributes)
     const field = tokenField(attributes.string(["token_type"]) ?? "")
-    if (field !== undefined && point.value !== undefined && point.value > 0) {
+    if (field !== undefined && point.value !== undefined && point.value !== 0) {
       tokens = addUsageTokens(tokens, tokensFor(field, point.value))
     }
   }
@@ -331,7 +354,7 @@ const mapMetrics = (
       if (
         field === undefined ||
         point.value === undefined ||
-        point.value <= 0 ||
+        point.value === 0 ||
         point.timestamp === undefined
       ) {
         return []
@@ -443,11 +466,180 @@ interface Bucket {
   readonly snapshot: UsageSnapshot
 }
 
+const versionedSnapshot = ({ revision, snapshot }: Bucket): OtelUsageSnapshot => ({
+  ...snapshot,
+  revision,
+})
+
 interface StoreState {
-  readonly buckets: ReadonlyMap<string, Bucket>
-  readonly generation: number
-  readonly latestDay?: string
-  readonly seen: ReadonlyMap<string, string>
+  buckets: Map<string, Bucket>
+  bucketsByDay: Map<string, Set<string>>
+  fingerprintOrder: Set<string>
+  fingerprintsByDay: Map<string, Set<string>>
+  generation: number
+  latestDay?: string
+  seen: Map<string, string>
+}
+
+const Fingerprint = Schema.NonEmptyString.check(Schema.isMaxLength(512))
+
+const UsageEventSchema = Schema.Struct({
+  agent: UsageAgentSchema,
+  fingerprint: Fingerprint,
+  model: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
+  occurredAt: UtcTimestamp,
+  provider: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
+  sourceName: Schema.String,
+  sourceSignal: Schema.Literals(["logs", "metrics", "traces"]),
+  tokens: UsageTokensSchema,
+})
+
+const isUsageEvent = Schema.is(UsageEventSchema)
+const isOtelUsageSnapshot = Schema.is(OtelUsageSnapshotSchema)
+
+const StoreCheckpoint = Schema.Struct({
+  deviceId: DeviceId,
+  generation: NonNegativeSafeInteger,
+  latestDay: Schema.optionalKey(UsageDay),
+  seen: Schema.Array(Schema.Tuple([Fingerprint, UsageDay])),
+  snapshots: Schema.Array(OtelUsageSnapshotSchema),
+  version: Schema.Literal(1),
+})
+
+type StoreCheckpoint = typeof StoreCheckpoint.Type
+
+const emptyStoreState = (): StoreState => ({
+  buckets: new Map(),
+  bucketsByDay: new Map(),
+  fingerprintOrder: new Set(),
+  fingerprintsByDay: new Map(),
+  generation: 0,
+  seen: new Map(),
+})
+
+const checkpointError = (operation: string, cause: unknown): LiveUsageStoreError =>
+  new LiveUsageStoreError({
+    reason: `${operation}: ${cause instanceof Error ? cause.message : String(cause)}`,
+  })
+
+const isMissingFile = (cause: unknown): boolean =>
+  typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT"
+
+const stateFromCheckpoint = (
+  deviceId: string,
+  checkpoint: StoreCheckpoint,
+): Effect.Effect<StoreState, LiveUsageStoreError> =>
+  Effect.gen(function* () {
+    if (checkpoint.deviceId !== deviceId) {
+      return yield* new LiveUsageStoreError({
+        reason: "collector checkpoint belongs to a different device",
+      })
+    }
+
+    const state = emptyStoreState()
+    state.generation = checkpoint.generation
+    if (checkpoint.latestDay !== undefined) state.latestDay = checkpoint.latestDay
+    for (const snapshot of checkpoint.snapshots) {
+      const { revision, ...usage } = snapshot
+      const key = usageSnapshotKey(usage)
+      if (state.buckets.has(key)) {
+        return yield* new LiveUsageStoreError({
+          reason: "collector checkpoint contains duplicate usage snapshots",
+        })
+      }
+      state.buckets.set(key, { revision, snapshot: usage })
+      addToDayIndex(state.bucketsByDay, usage.day, key)
+    }
+    for (const [digest, day] of checkpoint.seen) {
+      if (state.seen.has(digest)) {
+        return yield* new LiveUsageStoreError({
+          reason: "collector checkpoint contains duplicate fingerprints",
+        })
+      }
+      state.seen.set(digest, day)
+      state.fingerprintOrder.add(digest)
+      addToDayIndex(state.fingerprintsByDay, day, digest)
+    }
+    return state
+  })
+
+const loadStoreState = (
+  deviceId: string,
+  path: string | undefined,
+): Effect.Effect<StoreState, LiveUsageStoreError> => {
+  if (path === undefined) return Effect.succeed(emptyStoreState())
+  return Effect.gen(function* () {
+    const contents = yield* Effect.tryPromise({
+      try: async () => {
+        try {
+          return await readFile(path, "utf8")
+        } catch (cause) {
+          if (isMissingFile(cause)) return undefined
+          throw cause
+        }
+      },
+      catch: (cause) => checkpointError("read collector checkpoint", cause),
+    })
+    if (contents === undefined) return emptyStoreState()
+    const checkpoint = yield* Effect.try({
+      try: () => JSON.parse(contents) as unknown,
+      catch: (cause) => checkpointError("parse collector checkpoint", cause),
+    }).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(StoreCheckpoint)),
+      Effect.mapError((cause) => checkpointError("decode collector checkpoint", cause)),
+    )
+    return yield* stateFromCheckpoint(deviceId, checkpoint)
+  })
+}
+
+const checkpointFromState = (deviceId: string, state: StoreState): StoreCheckpoint => ({
+  deviceId,
+  generation: state.generation,
+  ...(state.latestDay === undefined ? {} : { latestDay: state.latestDay }),
+  seen: [...state.seen],
+  snapshots: [...state.buckets.values()]
+    .map(versionedSnapshot)
+    .toSorted((left, right) => usageSnapshotKey(left).localeCompare(usageSnapshotKey(right))),
+  version: 1,
+})
+
+const persistStoreState = (
+  path: string | undefined,
+  checkpoint: StoreCheckpoint,
+): Effect.Effect<void, LiveUsageStoreError> => {
+  if (path === undefined) return Effect.void
+  return Effect.tryPromise({
+    try: async () => {
+      const directory = dirname(path)
+      const temporary = `${path}.${crypto.randomUUID()}.tmp`
+      await mkdir(directory, { mode: 0o700, recursive: true })
+      try {
+        await writeFile(temporary, `${JSON.stringify(checkpoint)}\n`, {
+          flag: "wx",
+          mode: 0o600,
+        })
+        await rename(temporary, path)
+        await chmod(path, 0o600)
+      } finally {
+        await rm(temporary, { force: true })
+      }
+    },
+    catch: (cause) => checkpointError("write collector checkpoint", cause),
+  })
+}
+
+const checkedAddUsageTokens = (left: UsageTokens, right: UsageTokens): UsageTokens | undefined => {
+  const result = {
+    cacheCreationInput: left.cacheCreationInput + right.cacheCreationInput,
+    cacheReadInput: left.cacheReadInput + right.cacheReadInput,
+    input: left.input + right.input,
+    output: left.output + right.output,
+    reasoningOutput: left.reasoningOutput + right.reasoningOutput,
+    tool: left.tool + right.tool,
+  }
+  return Object.values(result).every((value) => Number.isSafeInteger(value) && value >= 0)
+    ? result
+    : undefined
 }
 
 const retentionCutoff = (latestDay: string, retentionDays: number): string => {
@@ -456,32 +648,128 @@ const retentionCutoff = (latestDay: string, retentionDays: number): string => {
   return date.toISOString().slice(0, 10)
 }
 
-const storeLayer = (deviceId: string, retentionDays: number, maxFingerprints: number) =>
+const nextDay = (day: string): string => {
+  const date = new Date(`${day}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
+  return date.toISOString().slice(0, 10)
+}
+
+const daysBetween = (earlier: string, later: string): number =>
+  Math.trunc(
+    (Date.parse(`${later}T00:00:00.000Z`) - Date.parse(`${earlier}T00:00:00.000Z`)) / 86_400_000,
+  )
+
+const addToDayIndex = (index: Map<string, Set<string>>, day: string, value: string): void => {
+  const values = index.get(day)
+  if (values === undefined) {
+    index.set(day, new Set([value]))
+  } else {
+    values.add(value)
+  }
+}
+
+const expireDay = (state: StoreState, day: string): void => {
+  const fingerprints = state.fingerprintsByDay.get(day)
+  if (fingerprints !== undefined) {
+    for (const current of fingerprints) {
+      state.seen.delete(current)
+      state.fingerprintOrder.delete(current)
+    }
+    state.fingerprintsByDay.delete(day)
+  }
+
+  const bucketKeys = state.bucketsByDay.get(day)
+  if (bucketKeys !== undefined) {
+    for (const key of bucketKeys) state.buckets.delete(key)
+    state.bucketsByDay.delete(day)
+  }
+}
+
+const expireBefore = (state: StoreState, nextLatestDay: string, retentionDays: number): void => {
+  if (state.latestDay === undefined) return
+  const currentCutoff = retentionCutoff(state.latestDay, retentionDays)
+  const nextCutoff = retentionCutoff(nextLatestDay, retentionDays)
+  const advance = daysBetween(currentCutoff, nextCutoff)
+  if (advance <= 0) return
+
+  if (advance >= retentionDays) {
+    state.buckets = new Map()
+    state.bucketsByDay = new Map()
+    state.fingerprintOrder = new Set()
+    state.fingerprintsByDay = new Map()
+    state.seen = new Map()
+    return
+  }
+
+  let day = currentCutoff
+  while (day < nextCutoff) {
+    expireDay(state, day)
+    day = nextDay(day)
+  }
+}
+
+const removeFingerprint = (state: StoreState, digest: string): void => {
+  const day = state.seen.get(digest)
+  if (day === undefined) return
+  state.seen.delete(digest)
+  state.fingerprintOrder.delete(digest)
+  const fingerprints = state.fingerprintsByDay.get(day)
+  fingerprints?.delete(digest)
+  if (fingerprints?.size === 0) state.fingerprintsByDay.delete(day)
+}
+
+type IngestResult =
+  | { readonly status: "failure"; readonly error: LiveUsageStoreError }
+  | { readonly status: "success"; readonly accepted: number }
+
+const storeLayer = (
+  deviceId: string,
+  retentionDays: number,
+  maxFingerprints: number,
+  statePath: string | undefined,
+) =>
   Layer.effect(
     LiveUsageStore,
     Effect.gen(function* () {
-      const state = yield* Ref.make<StoreState>({
-        buckets: new Map(),
-        generation: 0,
-        seen: new Map(),
-      })
+      const state = yield* Ref.make(yield* loadStoreState(deviceId, statePath))
 
-      const ingest = Effect.fn("LiveUsageStore.ingest")((events: ReadonlyArray<UsageEvent>) =>
-        Ref.modify(state, (current) => {
-          if (events.every((event) => current.seen.has(event.fingerprint))) {
-            return [0, current]
+      const ingest = Effect.fn("LiveUsageStore.ingest")(function* (
+        events: ReadonlyArray<UsageEvent>,
+      ) {
+        const result = yield* Ref.modify(state, (current): [IngestResult, StoreState] => {
+          for (const event of events) {
+            if (!isUsageEvent(event)) {
+              return [
+                {
+                  status: "failure",
+                  error: new LiveUsageStoreError({ reason: "invalid normalized usage event" }),
+                },
+                current,
+              ]
+            }
           }
 
-          const seen = new Map(current.seen)
-          const buckets = new Map(current.buckets)
-          let accepted = 0
+          const batchFingerprints = new Set<string>()
+          const accepted: Array<{ readonly day: string; readonly event: UsageEvent }> = []
           let latestDay = current.latestDay
           for (const event of events) {
-            if (seen.has(event.fingerprint)) continue
+            if (current.seen.has(event.fingerprint) || batchFingerprints.has(event.fingerprint)) {
+              continue
+            }
             const day = event.occurredAt.slice(0, 10)
-            seen.set(event.fingerprint, day)
+            batchFingerprints.add(event.fingerprint)
+            accepted.push({ day, event })
             latestDay = latestDay === undefined || day > latestDay ? day : latestDay
-            accepted += 1
+          }
+
+          if (accepted.length === 0 || latestDay === undefined) {
+            return [{ status: "success", accepted: 0 }, current]
+          }
+
+          const cutoff = retentionCutoff(latestDay, retentionDays)
+          const pendingBuckets = new Map<string, Bucket>()
+          for (const { day, event } of accepted) {
+            if (day < cutoff) continue
             const snapshot: UsageSnapshot = {
               agent: event.agent,
               day,
@@ -490,56 +778,81 @@ const storeLayer = (deviceId: string, retentionDays: number, maxFingerprints: nu
               tokens: event.tokens,
             }
             const key = usageSnapshotKey(snapshot)
-            const existing = buckets.get(key)
-            buckets.set(key, {
-              revision: (existing?.revision ?? 0) + 1,
+            const existing = pendingBuckets.get(key) ?? current.buckets.get(key)
+            const tokens = checkedAddUsageTokens(
+              existing?.snapshot.tokens ?? emptyUsageTokens(),
+              snapshot.tokens,
+            )
+            const revision = (existing?.revision ?? 0) + 1
+            if (tokens === undefined || !Number.isSafeInteger(revision)) {
+              return [
+                {
+                  status: "failure",
+                  error: new LiveUsageStoreError({
+                    reason: "usage aggregate exceeds safe integer bounds",
+                  }),
+                },
+                current,
+              ]
+            }
+            const bucket = {
+              revision,
               snapshot: {
                 ...snapshot,
-                tokens:
-                  existing === undefined
-                    ? snapshot.tokens
-                    : addUsageTokens(existing.snapshot.tokens, snapshot.tokens),
+                tokens,
               },
-            })
+            }
+            if (!isOtelUsageSnapshot({ ...bucket.snapshot, revision: bucket.revision })) {
+              return [
+                {
+                  status: "failure",
+                  error: new LiveUsageStoreError({ reason: "invalid live usage snapshot" }),
+                },
+                current,
+              ]
+            }
+            pendingBuckets.set(key, bucket)
           }
 
-          if (accepted === 0 || latestDay === undefined) return [0, current]
-          const cutoff = retentionCutoff(latestDay, retentionDays)
-          for (const [fingerprint, day] of seen) {
-            if (day < cutoff) seen.delete(fingerprint)
+          expireBefore(current, latestDay, retentionDays)
+
+          for (const { day, event } of accepted) {
+            if (day < cutoff) continue
+            current.seen.set(event.fingerprint, day)
+            current.fingerprintOrder.add(event.fingerprint)
+            addToDayIndex(current.fingerprintsByDay, day, event.fingerprint)
           }
-          while (seen.size > maxFingerprints) {
-            const oldest = seen.keys().next().value
+
+          while (current.seen.size > maxFingerprints) {
+            const oldest = current.fingerprintOrder.values().next().value
             if (oldest === undefined) break
-            seen.delete(oldest)
+            removeFingerprint(current, oldest)
           }
-          for (const [key, bucket] of buckets) {
-            if (bucket.snapshot.day < cutoff) buckets.delete(key)
-          }
-          return [
-            accepted,
-            {
-              buckets,
-              generation: current.generation + 1,
-              latestDay,
-              seen,
-            },
-          ]
-        }),
-      )
 
-      const snapshot = Effect.fn("LiveUsageStore.snapshot")(function* (capturedAt: string) {
-        const current = yield* Ref.get(state)
-        return yield* Schema.decodeUnknownEffect(OtelLiveBatchSchema)({
+          for (const [key, bucket] of pendingBuckets) {
+            if (!current.buckets.has(key)) {
+              addToDayIndex(current.bucketsByDay, bucket.snapshot.day, key)
+            }
+            current.buckets.set(key, bucket)
+          }
+
+          current.generation += 1
+          current.latestDay = latestDay
+          return [{ status: "success", accepted: accepted.length }, current]
+        })
+
+        if (result.status === "failure") return yield* Effect.fail(result.error)
+        return result.accepted
+      })
+
+      const decodeSnapshot = (capturedAt: string, current: StoreState) =>
+        Schema.decodeUnknownEffect(OtelLiveBatchSchema)({
           source: "otel-live",
           capturedAt,
           costs: [],
           deviceId,
           snapshots: [...current.buckets.values()]
-            .map((bucket) => ({
-              ...bucket.snapshot,
-              revision: bucket.revision,
-            }))
+            .map(versionedSnapshot)
             .toSorted((left, right) =>
               usageSnapshotKey(left).localeCompare(usageSnapshotKey(right)),
             ),
@@ -551,12 +864,33 @@ const storeLayer = (deviceId: string, retentionDays: number, maxFingerprints: nu
               }),
           ),
         )
+
+      const snapshot = Effect.fn("LiveUsageStore.snapshot")(function* (capturedAt: string) {
+        const current = yield* Ref.get(state)
+        return yield* decodeSnapshot(capturedAt, current)
+      })
+
+      const snapshotAfter = Effect.fn("LiveUsageStore.snapshotAfter")(function* (
+        capturedAt: string,
+        generation: number,
+      ) {
+        const current = yield* Ref.get(state)
+        if (current.generation <= generation) return undefined
+        const capturedGeneration = current.generation
+        const batch = yield* decodeSnapshot(capturedAt, current)
+        return { batch, generation: capturedGeneration }
       })
 
       return LiveUsageStore.of({
+        checkpoint: Ref.get(state).pipe(
+          Effect.flatMap((current) =>
+            persistStoreState(statePath, checkpointFromState(deviceId, current)),
+          ),
+        ),
         generation: Ref.get(state).pipe(Effect.map((current) => current.generation)),
         ingest,
         snapshot,
+        snapshotAfter,
       })
     }),
   )
@@ -566,6 +900,7 @@ export interface CollectorOptions {
   readonly maxFingerprints?: number
   readonly maxBodyBytes: number
   readonly retentionDays?: number
+  readonly statePath?: string
 }
 
 const contentTypeFor = (encoding: OtlpEncoding): string =>
@@ -700,7 +1035,11 @@ const makeCollectorLayer = (maxBodyBytes: number) =>
             const failure = yield* codec.encodeFailure("could not normalize OTLP payload", encoding)
             return response(failure, encoding, 400)
           }
-          yield* store.ingest(events.success)
+          const ingestion = yield* Effect.result(store.ingest(events.success))
+          if (ingestion._tag === "Failure") {
+            const failure = yield* codec.encodeFailure("invalid normalized usage batch", encoding)
+            return response(failure, encoding, 400)
+          }
           return response(yield* codec.encodeSuccess(signal, encoding), encoding)
         }),
       )
@@ -714,13 +1053,14 @@ export const collectorLayer = ({
   maxBodyBytes,
   maxFingerprints = 100_000,
   retentionDays = 45,
+  statePath,
 }: CollectorOptions) => {
   const boundedFingerprints = Math.max(1, Math.trunc(maxFingerprints))
   const boundedRetentionDays = Math.max(1, Math.trunc(retentionDays))
   const dependencies = Layer.mergeAll(
     otlpLayer,
     normalizerLayer,
-    storeLayer(deviceId, boundedRetentionDays, boundedFingerprints),
+    storeLayer(deviceId, boundedRetentionDays, boundedFingerprints, statePath),
   )
   return Layer.merge(
     dependencies,

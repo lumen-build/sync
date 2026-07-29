@@ -1,8 +1,16 @@
 import { Effect } from "effect"
 import { it } from "@effect/vitest"
-import { describe, expect } from "vitest"
+import { describe, expect, vi } from "vitest"
 
-import { CcusageImporter, InvalidCcusageReport, buildArguments, importerLayer } from "./index.js"
+import {
+  CcusageCommand,
+  CcusageCommandFailed,
+  CcusageImporter,
+  InvalidCcusageReport,
+  buildArguments,
+  commandLayer,
+  importerLayer,
+} from "./index.js"
 
 const metadata = {
   capturedAt: "2026-07-29T10:00:00.000Z",
@@ -194,4 +202,44 @@ it("builds deterministic, offline UTC ccusage arguments", () => {
     "--until",
     "20260729",
   ])
+})
+
+it.effect("terminates ccusage and returns a typed failure when the command times out", () => {
+  let resolveExit: ((exitCode: number) => void) | undefined
+  let exited = false
+  const kill = vi.fn(() => {
+    setTimeout(() => {
+      exited = true
+      resolveExit?.(137)
+    }, 1)
+  })
+
+  const layer = commandLayer({
+    timeoutMs: 10,
+    spawn: () => ({
+      exited: new Promise<number>((resolve) => {
+        resolveExit = resolve
+      }),
+      kill,
+      stderr: new Response("").body!,
+      stdout: new Response("").body!,
+    }),
+  })
+
+  return Effect.gen(function* () {
+    const command = yield* CcusageCommand
+    const failure = yield* Effect.flip(
+      command.runDaily({
+        agent: "claude",
+        since: "2026-07-01",
+        until: "2026-07-29",
+      }),
+    )
+
+    expect(failure).toBeInstanceOf(CcusageCommandFailed)
+    expect(failure.reason).toBe("ccusage timed out after 10ms")
+    expect(kill).toHaveBeenCalledOnce()
+    expect(kill).toHaveBeenCalledWith("SIGKILL")
+    expect(exited).toBe(true)
+  }).pipe(Effect.provide(layer))
 })

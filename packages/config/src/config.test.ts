@@ -75,6 +75,66 @@ it.effect("rejects unknown keys and non-loopback plaintext endpoints", () =>
   }),
 )
 
+it.effect("accepts collector listen URLs at the origin root", () =>
+  Effect.gen(function* () {
+    for (const listenUrl of ["http://127.0.0.1:4318", "http://localhost:4318/"]) {
+      const config = yield* decode({
+        collector: { listen_url: listenUrl },
+      })
+
+      expect(config.collector?.listenUrl).toBe(listenUrl)
+    }
+  }),
+)
+
+it.effect("rejects collector listen URLs with unsupported TOML URL components", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-sync-config-"))),
+    (directory) =>
+      Effect.gen(function* () {
+        const path = join(directory, "config.toml")
+        const invalidListenUrls = [
+          "http://127.0.0.1:4318/v1/traces",
+          "http://127.0.0.1:4318?transport=http",
+          "http://127.0.0.1:4318#collector",
+          "http://user:password@127.0.0.1:4318",
+        ]
+
+        for (const listenUrl of invalidListenUrls) {
+          yield* Effect.promise(() =>
+            writeFile(path, ["[collector]", `listen_url = "${listenUrl}"`, ""].join("\n")),
+          )
+
+          const failure = yield* Effect.flip(load({ environment: {}, path }))
+          expect(failure).toBeInstanceOf(InvalidConfiguration)
+        }
+      }),
+    (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
+  ),
+)
+
+it.effect("rejects collector environment overrides with unsupported URL components", () =>
+  Effect.gen(function* () {
+    const invalidListenUrls = [
+      "http://localhost:4318/v1/traces",
+      "http://localhost:4318?transport=http",
+      "http://localhost:4318#collector",
+      "http://user:password@localhost:4318",
+    ]
+
+    for (const listenUrl of invalidListenUrls) {
+      const failure = yield* Effect.flip(
+        decodeWithEnvironment(
+          { collector: { listen_url: "http://127.0.0.1:4318" } },
+          { LUMEN_COLLECTOR_LISTEN_URL: listenUrl },
+        ),
+      )
+
+      expect(failure).toBeInstanceOf(InvalidConfiguration)
+    }
+  }),
+)
+
 it.effect("fails only when a command requires an absent endpoint", () =>
   Effect.gen(function* () {
     const config = yield* decode({})

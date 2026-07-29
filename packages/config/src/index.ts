@@ -32,10 +32,19 @@ const CollectorListenUrl = Schema.NonEmptyString.check(
   Schema.makeFilter(
     (value) => {
       const url = parseUrl(value)
-      return url !== undefined && url.protocol === "http:" && loopbackHosts.has(url.hostname)
+      return (
+        url !== undefined &&
+        url.protocol === "http:" &&
+        loopbackHosts.has(url.hostname) &&
+        url.username === "" &&
+        url.password === "" &&
+        url.pathname === "/" &&
+        url.search === "" &&
+        url.hash === ""
+      )
     },
     {
-      message: "expected an HTTP loopback URL",
+      message: "expected an HTTP loopback URL without credentials, path, query, or fragment",
     },
   ),
 )

@@ -171,6 +171,21 @@ export const usageFromOpenCodeEvent = (
   })
 }
 
+const releaseUsageForRetry = (
+  state: OpenCodeUsageState,
+  usage: ReadonlyArray<AssistantUsage>,
+): void => {
+  for (const item of usage) {
+    state.emitted.delete(item.id)
+    rememberModel(
+      state.pendingModels,
+      item.id,
+      { model: item.model, provider: item.provider },
+      state.limit,
+    )
+  }
+}
+
 const attribute = (key: string, value: string | number) => ({
   key,
   value: typeof value === "number" ? { intValue: String(value) } : { stringValue: value },
@@ -237,13 +252,18 @@ export const LumenSync = async (
     event: async ({ event }) => {
       const usage = usageFromOpenCodeEvent(event, state)
       if (usage.length === 0) return
-      const response = await fetch(logsEndpoint(endpoint), {
-        body: JSON.stringify(toOtlpLogs(usage)),
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      })
-      if (!response.ok) {
-        throw new Error(`Lumen Sync collector rejected OpenCode usage (${response.status})`)
+      try {
+        const response = await fetch(logsEndpoint(endpoint), {
+          body: JSON.stringify(toOtlpLogs(usage)),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        })
+        if (!response.ok) {
+          throw new Error(`Lumen Sync collector rejected OpenCode usage (${response.status})`)
+        }
+      } catch (cause) {
+        releaseUsageForRetry(state, usage)
+        throw cause
       }
     },
   }

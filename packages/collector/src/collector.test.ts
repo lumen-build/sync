@@ -1,3 +1,7 @@
+import { mkdtemp, rm, stat } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 import type { OtelLiveBatch } from "@lumen-build/sync-contracts"
 import { encodeRequest, type DecodedTelemetry } from "@lumen-build/sync-otlp"
 import { Effect } from "effect"
@@ -24,6 +28,86 @@ const attributes = (serviceName: string): Extract<DecodedTelemetry, { readonly _
       timestamp,
     },
   ],
+})
+
+const logRequest = (
+  records: ReadonlyArray<{
+    readonly input?: number
+    readonly model?: string
+    readonly output?: number
+    readonly provider?: string
+    readonly timeUnixNano?: string
+  }>,
+): Request =>
+  new Request("https://collector.lumen.build/v1/logs", {
+    body: JSON.stringify({
+      resourceLogs: [
+        {
+          resource: {
+            attributes: [
+              {
+                key: "service.name",
+                value: { stringValue: "opencode-mocked-agent" },
+              },
+            ],
+          },
+          scopeLogs: [
+            {
+              logRecords: records.map(
+                ({
+                  input = 0,
+                  model = "mock-model",
+                  output = 0,
+                  provider = "mock-provider",
+                  timeUnixNano = nanos,
+                }) => ({
+                  attributes: [
+                    {
+                      key: "gen_ai.request.model",
+                      value: { stringValue: model },
+                    },
+                    {
+                      key: "gen_ai.provider.name",
+                      value: { stringValue: provider },
+                    },
+                    {
+                      key: "gen_ai.usage.input_tokens",
+                      value: { intValue: String(input) },
+                    },
+                    {
+                      key: "gen_ai.usage.output_tokens",
+                      value: { intValue: String(output) },
+                    },
+                  ],
+                  eventName: "gen_ai.client.inference.operation.details",
+                  timeUnixNano,
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })
+
+const usageEvent = (fingerprint: string, occurredAt: string, input = 1) => ({
+  agent: "opencode" as const,
+  fingerprint,
+  model: "mocked-model",
+  occurredAt,
+  provider: "mocked-provider",
+  sourceName: "mocked",
+  sourceSignal: "logs" as const,
+  tokens: {
+    cacheCreationInput: 0,
+    cacheReadInput: 0,
+    input,
+    output: 0,
+    reasoningOutput: 0,
+    tool: 0,
+  },
 })
 
 it("infers every primary harness identity", () => {
@@ -115,6 +199,7 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
     expect(yield* store.generation).toBe(1)
     expect(yield* store.ingest(events)).toBe(0)
     expect(yield* store.generation).toBe(1)
+    expect(yield* store.snapshotAfter("2026-07-29T10:01:00.000Z", 1)).toBeUndefined()
     const first = yield* store.snapshot("2026-07-29T10:01:00.000Z")
     expect(first.snapshots[0]?.revision).toBe(1)
 
@@ -128,7 +213,9 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
       ],
     })
     expect(yield* store.ingest(later)).toBe(1)
-    const second = yield* store.snapshot("2026-07-29T10:03:00.000Z")
+    const versioned = yield* store.snapshotAfter("2026-07-29T10:03:00.000Z", 1)
+    expect(versioned?.generation).toBe(2)
+    const second = versioned!.batch
     expect(second.snapshots[0]).toMatchObject({
       revision: 2,
       tokens: { input: 24, output: 6 },
@@ -136,34 +223,55 @@ it.effect("deduplicates events and increments live revisions atomically", () =>
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )
 
+it.effect("restores acknowledged revisions and fingerprints from a private checkpoint", () =>
+  Effect.acquireUseRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), "lumen-collector-state-"))),
+    (directory) => {
+      const statePath = join(directory, "collector.json")
+      const layer = () => collectorLayer({ deviceId, maxBodyBytes: 1_000_000, statePath })
+      const firstEvent = usageEvent("checkpoint-one", timestamp)
+      const secondEvent = usageEvent("checkpoint-two", "2026-07-29T10:01:00.000Z")
+
+      return Effect.gen(function* () {
+        yield* Effect.gen(function* () {
+          const store = yield* LiveUsageStore
+          expect(yield* store.ingest([firstEvent, secondEvent])).toBe(2)
+          expect((yield* store.snapshot(timestamp)).snapshots[0]?.revision).toBe(2)
+          yield* store.checkpoint
+        }).pipe(Effect.provide(layer()))
+
+        expect((yield* Effect.promise(() => stat(statePath))).mode & 0o777).toBe(0o600)
+
+        yield* Effect.gen(function* () {
+          const store = yield* LiveUsageStore
+          expect(yield* store.generation).toBe(1)
+          expect(yield* store.ingest([firstEvent])).toBe(0)
+          expect(
+            yield* store.ingest([usageEvent("checkpoint-three", "2026-07-29T10:02:00.000Z")]),
+          ).toBe(1)
+          const restored = yield* store.snapshot("2026-07-29T10:03:00.000Z")
+          expect(restored.snapshots[0]).toMatchObject({
+            revision: 3,
+            tokens: { input: 3 },
+          })
+        }).pipe(Effect.provide(layer()))
+      })
+    },
+    (directory) => Effect.promise(() => rm(directory, { force: true, recursive: true })),
+  ),
+)
+
 it.effect("bounds live fingerprint retention and prunes old buckets", () =>
   Effect.gen(function* () {
     const store = yield* LiveUsageStore
-    const event = (fingerprint: string, occurredAt: string) => ({
-      agent: "opencode" as const,
-      fingerprint,
-      model: "mocked-model",
-      occurredAt,
-      provider: "mocked-provider",
-      sourceName: "mocked",
-      sourceSignal: "logs" as const,
-      tokens: {
-        cacheCreationInput: 0,
-        cacheReadInput: 0,
-        input: 1,
-        output: 0,
-        reasoningOutput: 0,
-        tool: 0,
-      },
-    })
 
-    expect(yield* store.ingest([event("day-one", "2026-07-01T00:00:00.000Z")])).toBe(1)
-    expect(yield* store.ingest([event("day-two", "2026-07-02T00:00:00.000Z")])).toBe(1)
-    expect(yield* store.ingest([event("day-three", "2026-07-03T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("day-one", "2026-07-01T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("day-two", "2026-07-02T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("day-three", "2026-07-03T00:00:00.000Z")])).toBe(1)
     const snapshot = yield* store.snapshot("2026-07-03T00:01:00.000Z")
     expect(snapshot.snapshots.map(({ day }) => day)).toEqual(["2026-07-02", "2026-07-03"])
 
-    expect(yield* store.ingest([event("day-one", "2026-07-03T00:02:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("day-one", "2026-07-03T00:02:00.000Z")])).toBe(1)
   }).pipe(
     Effect.provide(
       collectorLayer({
@@ -174,6 +282,117 @@ it.effect("bounds live fingerprint retention and prunes old buckets", () =>
       }),
     ),
   ),
+)
+
+it.effect("retains exactly 45 days and expires fingerprints with their day partition", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+    const first = usageEvent("boundary", "2026-07-01T00:00:00.000Z")
+
+    expect(yield* store.ingest([first])).toBe(1)
+    expect(yield* store.ingest([usageEvent("day-45", "2026-08-14T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([first])).toBe(0)
+
+    expect(yield* store.ingest([usageEvent("day-46", "2026-08-15T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("boundary", "2026-08-15T00:01:00.000Z")])).toBe(1)
+
+    const snapshot = yield* store.snapshot("2026-08-15T00:02:00.000Z")
+    expect(snapshot.snapshots.map(({ day }) => day)).toEqual(["2026-08-14", "2026-08-15"])
+
+    expect(yield* store.ingest([usageEvent("far-future", "2027-01-01T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("boundary", "2027-01-01T00:01:00.000Z")])).toBe(1)
+    expect(
+      (yield* store.snapshot("2027-01-01T00:02:00.000Z")).snapshots.map(({ day }) => day),
+    ).toEqual(["2027-01-01"])
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
+it.effect("keeps FIFO dedupe state bounded under sustained ingestion", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+    const events = Array.from({ length: 10 }, (_, index) =>
+      usageEvent(`event-${index}`, `2026-07-29T10:00:${String(index).padStart(2, "0")}.000Z`),
+    )
+
+    for (const event of events) expect(yield* store.ingest([event])).toBe(1)
+    expect(yield* store.ingest([events.at(-1)!])).toBe(0)
+    expect(yield* store.ingest([events[0]!])).toBe(1)
+    expect(yield* store.generation).toBe(11)
+
+    const snapshot = yield* store.snapshot("2026-07-29T10:01:00.000Z")
+    expect(snapshot.snapshots[0]?.tokens.input).toBe(11)
+  }).pipe(
+    Effect.provide(
+      collectorLayer({
+        deviceId,
+        maxBodyBytes: 1_000_000,
+        maxFingerprints: 3,
+      }),
+    ),
+  ),
+)
+
+it.effect("rejects a poisoned normalized batch without mutating the store", () =>
+  Effect.gen(function* () {
+    const collector = yield* Collector
+    const store = yield* LiveUsageStore
+    const valid = { input: 7, model: "good-model", provider: "good-provider" }
+    const poisoned = [
+      { input: 1, model: "", provider: "good-provider" },
+      { input: 1, model: "x".repeat(257), provider: "good-provider" },
+      { input: 1, model: "good-model", provider: "" },
+      { input: 1, model: "good-model", provider: "x".repeat(257) },
+      { input: -1, model: "good-model", provider: "good-provider" },
+      { input: Number.MAX_SAFE_INTEGER + 1, model: "good-model", provider: "good-provider" },
+    ]
+
+    for (const poison of poisoned) {
+      const result = yield* collector.handle(logRequest([valid, poison]))
+      expect(result.status).toBe(400)
+      expect(yield* store.generation).toBe(0)
+      expect((yield* store.snapshot("2026-07-29T10:01:00.000Z")).snapshots).toEqual([])
+    }
+
+    expect((yield* collector.handle(logRequest([valid]))).status).toBe(200)
+    const snapshot = yield* store.snapshot("2026-07-29T10:01:00.000Z")
+    expect(snapshot.snapshots[0]).toMatchObject({
+      revision: 1,
+      tokens: { input: 7 },
+    })
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
+)
+
+it.effect("rejects checked-add overflow and remains usable", () =>
+  Effect.gen(function* () {
+    const collector = yield* Collector
+    const store = yield* LiveUsageStore
+
+    expect(
+      (yield* collector.handle(
+        logRequest([
+          {
+            input: Number.MAX_SAFE_INTEGER,
+            timeUnixNano: "1785319200000000000",
+          },
+        ]),
+      )).status,
+    ).toBe(200)
+    expect(
+      (yield* collector.handle(logRequest([{ input: 1, timeUnixNano: "1785319260000000000" }])))
+        .status,
+    ).toBe(400)
+    expect(yield* store.generation).toBe(1)
+
+    expect(
+      (yield* collector.handle(logRequest([{ output: 1, timeUnixNano: "1785319320000000000" }])))
+        .status,
+    ).toBe(200)
+    const snapshot = yield* store.snapshot("2026-07-29T10:03:00.000Z")
+    expect(snapshot.snapshots[0]).toMatchObject({
+      revision: 2,
+      tokens: { input: Number.MAX_SAFE_INTEGER, output: 1 },
+    })
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 1_000_000 }))),
 )
 
 it.effect("accepts mocked JSON and protobuf OTLP requests", () =>

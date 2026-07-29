@@ -29,7 +29,20 @@ try {
     stdio: "ignore",
   })
   const api = await import(pathToFileURL(join(installed, "dist", "index.js")).href)
-  for (const name of ["Auth", "Collector", "Config", "Harness", "Runtime"]) {
+  for (const name of [
+    "Auth",
+    "Ccusage",
+    "Collector",
+    "Config",
+    "Contracts",
+    "Destination",
+    "Harness",
+    "Otlp",
+    "Reconciliation",
+    "Runtime",
+    "Service",
+    "SyncIdJournal",
+  ]) {
     if (!(name in api)) throw new Error(`published API is missing ${name}`)
   }
   await import(pathToFileURL(join(installed, "dist", "opencode.js")).href)

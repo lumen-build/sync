@@ -46,31 +46,52 @@ const authenticationFailed = (operation: string, reason: unknown): Authenticatio
     reason: reason instanceof Error ? reason.message : String(reason),
   })
 
+const OIDC_REQUEST_TIMEOUT = "30 seconds"
+
+const withRequestDeadline = <A>(
+  operation: string,
+  request: Effect.Effect<A, AuthenticationFailed>,
+): Effect.Effect<A, AuthenticationFailed> =>
+  request.pipe(
+    Effect.timeoutOrElse({
+      duration: OIDC_REQUEST_TIMEOUT,
+      orElse: () =>
+        Effect.fail(authenticationFailed(operation, `timed out after ${OIDC_REQUEST_TIMEOUT}`)),
+    }),
+  )
+
 const requestJson = Effect.fn("OidcClient.requestJson")(function* (
   operation: string,
   url: string,
   init?: RequestInit,
 ) {
-  const response = yield* Effect.tryPromise({
-    try: (signal) => fetch(url, { ...init, signal }),
-    catch: (cause) => authenticationFailed(operation, cause),
-  })
-  if (!response.ok) {
-    const body = yield* Effect.tryPromise({
-      try: () => response.text(),
-      catch: (cause) => authenticationFailed(`${operation}.readErrorBody`, cause),
-    }).pipe(Effect.orElseSucceed(() => ""))
-    return yield* Effect.fail(
-      authenticationFailed(
-        operation,
-        `HTTP ${response.status}${body.length === 0 ? "" : `: ${body.slice(0, 512)}`}`,
-      ),
-    )
-  }
-  return yield* Effect.tryPromise({
-    try: () => response.json(),
-    catch: (cause) => authenticationFailed(`${operation}.decodeJson`, cause),
-  })
+  return yield* withRequestDeadline(
+    operation,
+    Effect.tryPromise({
+      try: async (signal) => {
+        const response = await fetch(url, { ...init, signal })
+        if (!response.ok) {
+          let body = ""
+          try {
+            body = await response.text()
+          } catch {
+            // The status is sufficient evidence when an error body cannot be read.
+          }
+          throw authenticationFailed(
+            operation,
+            `HTTP ${response.status}${body.length === 0 ? "" : `: ${body.slice(0, 512)}`}`,
+          )
+        }
+        try {
+          return await response.json()
+        } catch (cause) {
+          throw authenticationFailed(`${operation}.decodeJson`, cause)
+        }
+      },
+      catch: (cause) =>
+        cause instanceof AuthenticationFailed ? cause : authenticationFailed(operation, cause),
+    }),
+  )
 })
 
 const requestVoid = Effect.fn("OidcClient.requestVoid")(function* (
@@ -78,10 +99,13 @@ const requestVoid = Effect.fn("OidcClient.requestVoid")(function* (
   url: string,
   init: RequestInit,
 ) {
-  const response = yield* Effect.tryPromise({
-    try: (signal) => fetch(url, { ...init, signal }),
-    catch: (cause) => authenticationFailed(operation, cause),
-  })
+  const response = yield* withRequestDeadline(
+    operation,
+    Effect.tryPromise({
+      try: (signal) => fetch(url, { ...init, signal }),
+      catch: (cause) => authenticationFailed(operation, cause),
+    }),
+  )
   if (!response.ok) {
     return yield* Effect.fail(authenticationFailed(operation, `HTTP ${response.status}`))
   }
@@ -89,7 +113,7 @@ const requestVoid = Effect.fn("OidcClient.requestVoid")(function* (
 
 export const discover = Effect.fn("OidcClient.discover")(function* (issuer: string) {
   const url = new URL(
-    "/.well-known/openid-configuration",
+    ".well-known/openid-configuration",
     issuer.endsWith("/") ? issuer : `${issuer}/`,
   )
   const json = yield* requestJson("OidcClient.discover", url.toString())

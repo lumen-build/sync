@@ -137,6 +137,13 @@ export interface CommandOutput {
   readonly stdout: string
 }
 
+export interface CcusageChildProcess {
+  readonly exited: Promise<number>
+  readonly kill: (signal?: NodeJS.Signals | number) => void
+  readonly stderr: ReadableStream<Uint8Array>
+  readonly stdout: ReadableStream<Uint8Array>
+}
+
 export interface CcusageImporterInterface {
   readonly importDaily: (
     input: ImportDailyInput,
@@ -332,51 +339,94 @@ export const buildArguments = ({ agent, since, until }: RunDailyInput): Readonly
   until.replaceAll("-", ""),
 ]
 
+export const DEFAULT_CCUSAGE_TIMEOUT_MS = 60_000
+
 export interface CommandOptions {
   readonly executable?: string
   readonly prefixArguments?: ReadonlyArray<string>
+  readonly spawn?: (command: ReadonlyArray<string>) => CcusageChildProcess
+  readonly timeoutMs?: number
 }
 
 export const makeCommand = ({
   executable = "ccusage",
   prefixArguments = [],
+  spawn = (command) =>
+    Bun.spawn([...command], {
+      stderr: "pipe",
+      stdout: "pipe",
+    }),
+  timeoutMs = DEFAULT_CCUSAGE_TIMEOUT_MS,
 }: CommandOptions = {}) =>
   Effect.succeed(
     CcusageCommand.of({
       runDaily: Effect.fn("CcusageCommand.runDaily")(function* (input) {
-        const child = yield* Effect.try({
-          try: () =>
-            Bun.spawn([executable, ...prefixArguments, ...buildArguments(input)], {
-              stderr: "pipe",
-              stdout: "pipe",
-            }),
-          catch: (cause) =>
-            new CcusageCommandFailed({
-              agent: input.agent,
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
-        const [exitCode, stdout, stderr] = yield* Effect.tryPromise({
-          try: () =>
-            Promise.all([
-              child.exited,
-              new Response(child.stdout).text(),
-              new Response(child.stderr).text(),
-            ]),
-          catch: (cause) =>
-            new CcusageCommandFailed({
-              agent: input.agent,
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
-        if (exitCode !== 0) {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
           return yield* new CcusageCommandFailed({
             agent: input.agent,
-            exitCode,
-            reason: stderr.trim() || `ccusage exited with code ${exitCode}`,
+            reason: `ccusage timeout must be a positive finite number, received ${timeoutMs}`,
           })
         }
-        return { stderr, stdout }
+
+        const child = yield* Effect.try({
+          try: () => spawn([executable, ...prefixArguments, ...buildArguments(input)]),
+          catch: (cause) =>
+            new CcusageCommandFailed({
+              agent: input.agent,
+              reason: cause instanceof Error ? cause.message : String(cause),
+            }),
+        })
+        const outcome = yield* Effect.tryPromise({
+          try: async () => {
+            const stdoutPromise = new Response(child.stdout).text()
+            const stderrPromise = new Response(child.stderr).text()
+            const completed = Promise.all([child.exited, stdoutPromise, stderrPromise]).then(
+              ([exitCode, commandStdout, commandStderr]) => ({
+                kind: "Completed" as const,
+                exitCode,
+                stderr: commandStderr,
+                stdout: commandStdout,
+              }),
+            )
+            let timeoutId: ReturnType<typeof setTimeout> | undefined
+            const timedOut = new Promise<{ readonly kind: "TimedOut" }>((resolve) => {
+              timeoutId = setTimeout(() => resolve({ kind: "TimedOut" }), timeoutMs)
+            })
+
+            try {
+              const result = await Promise.race([completed, timedOut])
+              if (result.kind === "TimedOut") {
+                try {
+                  child.kill("SIGKILL")
+                } finally {
+                  await Promise.allSettled([child.exited, stdoutPromise, stderrPromise])
+                }
+              }
+              return result
+            } finally {
+              if (timeoutId !== undefined) clearTimeout(timeoutId)
+            }
+          },
+          catch: (cause) =>
+            new CcusageCommandFailed({
+              agent: input.agent,
+              reason: cause instanceof Error ? cause.message : String(cause),
+            }),
+        })
+        if (outcome.kind === "TimedOut") {
+          return yield* new CcusageCommandFailed({
+            agent: input.agent,
+            reason: `ccusage timed out after ${timeoutMs}ms`,
+          })
+        }
+        if (outcome.exitCode !== 0) {
+          return yield* new CcusageCommandFailed({
+            agent: input.agent,
+            exitCode: outcome.exitCode,
+            reason: outcome.stderr.trim() || `ccusage exited with code ${outcome.exitCode}`,
+          })
+        }
+        return { stderr: outcome.stderr, stdout: outcome.stdout }
       }),
     }),
   )

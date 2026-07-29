@@ -6,6 +6,26 @@ import { createRemoteJWKSet, jwtVerify } from "jose"
 import { AuthenticationFailed } from "./errors.js"
 import { discover } from "./oidc-client.js"
 
+const AUTHENTICATOR_REQUEST_TIMEOUT = "30 seconds"
+const AUTHENTICATOR_REQUEST_TIMEOUT_MILLIS = 30_000
+
+const withAuthenticationDeadline = <A>(
+  operation: string,
+  request: Effect.Effect<A, AuthenticationFailed>,
+): Effect.Effect<A, AuthenticationFailed> =>
+  request.pipe(
+    Effect.timeoutOrElse({
+      duration: AUTHENTICATOR_REQUEST_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          new AuthenticationFailed({
+            operation,
+            reason: `timed out after ${AUTHENTICATOR_REQUEST_TIMEOUT}`,
+          }),
+        ),
+    }),
+  )
+
 export interface Interface {
   readonly authenticate: (
     token: Redacted.Redacted<string>,
@@ -29,24 +49,32 @@ export const oidcJwtAuthenticatorLayer = ({
     RequestAuthenticator,
     Effect.gen(function* () {
       const configuredIssuer = typeof issuer === "string" ? issuer : issuer()
-      const discovery = yield* discover(configuredIssuer)
-      const jwks = createRemoteJWKSet(new URL(discovery.jwks_uri))
+      const discovery = yield* withAuthenticationDeadline(
+        "RequestAuthenticator.oidcJwt.discover",
+        discover(configuredIssuer),
+      )
+      const jwks = createRemoteJWKSet(new URL(discovery.jwks_uri), {
+        timeoutDuration: AUTHENTICATOR_REQUEST_TIMEOUT_MILLIS,
+      })
 
       const authenticate = Effect.fn("RequestAuthenticator.oidcJwt.authenticate")(function* (
         token: Redacted.Redacted<string>,
       ) {
-        const verified = yield* Effect.tryPromise({
-          try: () =>
-            jwtVerify(Redacted.value(token), jwks, {
-              audience,
-              issuer: configuredIssuer,
-            }),
-          catch: (cause) =>
-            new AuthenticationFailed({
-              operation: "RequestAuthenticator.oidcJwt.authenticate",
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
+        const verified = yield* withAuthenticationDeadline(
+          "RequestAuthenticator.oidcJwt.authenticate",
+          Effect.tryPromise({
+            try: () =>
+              jwtVerify(Redacted.value(token), jwks, {
+                audience,
+                issuer: configuredIssuer,
+              }),
+            catch: (cause) =>
+              new AuthenticationFailed({
+                operation: "RequestAuthenticator.oidcJwt.authenticate",
+                reason: cause instanceof Error ? cause.message : String(cause),
+              }),
+          }),
+        )
         if (verified.payload.sub === undefined || verified.payload.sub.length === 0) {
           return yield* new AuthenticationFailed({
             operation: "RequestAuthenticator.oidcJwt.authenticate",
@@ -109,7 +137,10 @@ export const oidcIntrospectionAuthenticatorLayer = ({
     RequestAuthenticator,
     Effect.gen(function* () {
       const configuredIssuer = typeof issuer === "string" ? issuer : issuer()
-      const discovery = yield* discover(configuredIssuer)
+      const discovery = yield* withAuthenticationDeadline(
+        "RequestAuthenticator.introspection.discover",
+        discover(configuredIssuer),
+      )
       if (discovery.introspection_endpoint === undefined) {
         return yield* new AuthenticationFailed({
           operation: "RequestAuthenticator.introspection.acquire",
@@ -123,37 +154,43 @@ export const oidcIntrospectionAuthenticatorLayer = ({
       ) {
         const body = new URLSearchParams({ token: Redacted.value(token) })
         if (clientId !== undefined) body.set("client_id", clientId)
-        const response = yield* Effect.tryPromise({
-          try: (signal) =>
-            fetch(endpoint, {
-              body,
-              headers: {
-                accept: "application/json",
-                "content-type": "application/x-www-form-urlencoded",
-              },
-              method: "POST",
-              signal,
-            }),
-          catch: (cause) =>
-            new AuthenticationFailed({
-              operation: "RequestAuthenticator.introspection.request",
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
-        if (!response.ok) {
-          return yield* new AuthenticationFailed({
-            operation: "RequestAuthenticator.introspection.request",
-            reason: `HTTP ${response.status}`,
-          })
-        }
-        const json = yield* Effect.tryPromise({
-          try: () => response.json(),
-          catch: (cause) =>
-            new AuthenticationFailed({
-              operation: "RequestAuthenticator.introspection.decodeJson",
-              reason: cause instanceof Error ? cause.message : String(cause),
-            }),
-        })
+        const json = yield* withAuthenticationDeadline(
+          "RequestAuthenticator.introspection.request",
+          Effect.tryPromise({
+            try: async (signal) => {
+              const response = await fetch(endpoint, {
+                body,
+                headers: {
+                  accept: "application/json",
+                  "content-type": "application/x-www-form-urlencoded",
+                },
+                method: "POST",
+                signal,
+              })
+              if (!response.ok) {
+                throw new AuthenticationFailed({
+                  operation: "RequestAuthenticator.introspection.request",
+                  reason: `HTTP ${response.status}`,
+                })
+              }
+              try {
+                return await response.json()
+              } catch (cause) {
+                throw new AuthenticationFailed({
+                  operation: "RequestAuthenticator.introspection.decodeJson",
+                  reason: cause instanceof Error ? cause.message : String(cause),
+                })
+              }
+            },
+            catch: (cause) =>
+              cause instanceof AuthenticationFailed
+                ? cause
+                : new AuthenticationFailed({
+                    operation: "RequestAuthenticator.introspection.request",
+                    reason: cause instanceof Error ? cause.message : String(cause),
+                  }),
+          }),
+        )
         const claims = yield* Schema.decodeUnknownEffect(IntrospectionClaims)(json).pipe(
           Effect.mapError(
             (error) =>

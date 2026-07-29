@@ -5,8 +5,15 @@ import { join } from "node:path"
 import { expect, it } from "@effect/vitest"
 import { Effect, Redacted } from "effect"
 
-import { environmentAssertionLayer, fileSecretStoreLayer } from "./adapters"
+import { browserCommand, environmentAssertionLayer, fileSecretStoreLayer } from "./adapters"
 import { AssertionProvider, SecretStore } from "./ports"
+
+it("opens Windows URLs without a command shell", () => {
+  const url =
+    "https://identity.lumen.build/authorize?state=expected&next=^calc.exe|whoami>owned.txt"
+
+  expect(browserCommand(url, "win32")).toEqual(["rundll32.exe", "url.dll,FileProtocolHandler", url])
+})
 
 it.effect("uses an explicit CI OIDC assertion without exposing it", () =>
   Effect.gen(function* () {

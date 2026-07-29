@@ -50,6 +50,7 @@ import { Console, Effect, Layer, Option, Redacted, Schema } from "effect"
 import { Command, Flag } from "effect/unstable/cli"
 
 import { parseCollectorAddress, runCollector, runLocalCollector, syncDaily } from "./runtime"
+import { makeFileDailySyncIdJournal } from "./sync-id-journal"
 
 const VERSION = "0.1.0"
 const environment = process.env as Readonly<Record<string, string | undefined>>
@@ -210,6 +211,7 @@ const harnessFlags = {
     Flag.between(0, harnessChoice.length),
     Flag.withDescription("Agent harness to configure; repeat to select multiple"),
   ),
+  json: Flag.boolean("json").pipe(Flag.withDescription("Print stable machine-readable JSON")),
 }
 
 const selectedHarnesses = (values: ReadonlyArray<Harness>): ReadonlyArray<Harness> =>
@@ -221,11 +223,12 @@ const harnessSetupCommand = Command.make(
     ...harnessFlags,
     force: Flag.boolean("force").pipe(Flag.withDescription("Replace conflicting managed fields")),
   },
-  ({ agent, force }) =>
+  ({ agent, force, json }) =>
     Effect.gen(function* () {
       const config = yield* configuration()
       const collector = yield* requireCollector(config)
       const paths = makeHarnessPaths(hostPaths())
+      const results = []
       for (const harness of selectedHarnesses(agent)) {
         const result = yield* configureHarness({
           collectorUrl: collector.listenUrl,
@@ -233,23 +236,49 @@ const harnessSetupCommand = Command.make(
           harness,
           paths,
         })
-        yield* Console.log(`${harness}: ${result.state}`)
+        results.push({
+          changed: result.changes.map((change) => change.path.join(".")),
+          harness,
+          paths: {
+            configuration: paths.configurations[harness],
+            ownership: paths.ownership,
+          },
+          state: result.state,
+        })
+        if (!json) yield* Console.log(`${harness}: ${result.state}`)
       }
-      yield* Console.log(
-        "OpenCode also needs LUMEN_COLLECTOR_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT in its environment.",
-      )
+      if (json) {
+        yield* Console.log(JSON.stringify({ operation: "setup", results, version: 1 }))
+      } else {
+        yield* Console.log(
+          "OpenCode also needs LUMEN_COLLECTOR_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT in its environment.",
+        )
+      }
     }),
 ).pipe(Command.withDescription("Configure privacy-safe OTLP export"))
 
-const harnessRemoveCommand = Command.make("remove", harnessFlags, ({ agent }) =>
+const harnessRemoveCommand = Command.make("remove", harnessFlags, ({ agent, json }) =>
   Effect.gen(function* () {
     const paths = makeHarnessPaths(hostPaths())
+    const results = []
     for (const harness of selectedHarnesses(agent)) {
       const result = yield* removeHarness({ harness, paths })
-      yield* Console.log(
-        `${harness}: restored ${result.restored.length}, preserved ${result.preserved.length}`,
-      )
+      results.push({
+        harness,
+        paths: {
+          configuration: paths.configurations[harness],
+          ownership: paths.ownership,
+        },
+        preserved: result.preserved,
+        restored: result.restored,
+      })
+      if (!json) {
+        yield* Console.log(
+          `${harness}: restored ${result.restored.length}, preserved ${result.preserved.length}`,
+        )
+      }
     }
+    if (json) yield* Console.log(JSON.stringify({ operation: "remove", results, version: 1 }))
   }),
 ).pipe(Command.withDescription("Restore fields previously managed by Lumen Sync"))
 
@@ -282,6 +311,7 @@ const syncCommand = Command.make(
         agents: selectedAgents,
         capturedAt: new Date().toISOString(),
         deviceId,
+        syncIds: makeFileDailySyncIdJournal(join(dirname(configPath), "state", "daily-sync")),
         since: Option.getOrElse(since, today),
         until: Option.getOrElse(until, today),
       }).pipe(
@@ -311,6 +341,10 @@ const collectorStartCommand = Command.make(
       Flag.withDescription("Collect in memory without uploading"),
     ),
     uploadInterval: Flag.integer("upload-interval").pipe(
+      Flag.filter(
+        (seconds) => seconds >= 1,
+        () => "Upload interval must be at least 1 second",
+      ),
       Flag.withDefault(30),
       Flag.withDescription("Live upload interval in seconds"),
     ),
@@ -322,7 +356,11 @@ const collectorStartCommand = Command.make(
       const collector = yield* requireCollector(config)
       const deviceId = yield* loadDeviceId(configPath)
       const address = parseCollectorAddress(collector.listenUrl)
-      const collectorServices = collectorLayer({ deviceId, maxBodyBytes: 10 * 1024 * 1024 })
+      const collectorServices = collectorLayer({
+        deviceId,
+        maxBodyBytes: 10 * 1024 * 1024,
+        statePath: join(dirname(configPath), "state", "collector.json"),
+      })
       if (localOnly) {
         return yield* runLocalCollector(address).pipe(Effect.provide(collectorServices))
       }

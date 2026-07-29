@@ -8,9 +8,27 @@ import { AuthorizationCodeReceiver } from "./oidc-client.js"
 import { AssertionProvider, SecretStore } from "./ports.js"
 
 const StoredSecrets = Schema.Record(Schema.String, Schema.String)
+const ASSERTION_REQUEST_TIMEOUT = "30 seconds"
 
 const secretError = (operation: string, cause: unknown): SecretStoreError =>
   new SecretStoreError({ cause, operation })
+
+const withAssertionDeadline = <A>(
+  operation: string,
+  request: Effect.Effect<A, AuthenticationFailed>,
+): Effect.Effect<A, AuthenticationFailed> =>
+  request.pipe(
+    Effect.timeoutOrElse({
+      duration: ASSERTION_REQUEST_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          new AuthenticationFailed({
+            operation,
+            reason: `timed out after ${ASSERTION_REQUEST_TIMEOUT}`,
+          }),
+        ),
+    }),
+  )
 
 const readSecrets = (path: string) =>
   Effect.tryPromise({
@@ -81,32 +99,38 @@ const githubAssertion = Effect.fn("AssertionProvider.github")(function* (
 
   const url = new URL(requestUrl)
   if (audience !== undefined) url.searchParams.set("audience", audience)
-  const response = yield* Effect.tryPromise({
-    try: (signal) =>
-      fetch(url, {
-        headers: { authorization: `Bearer ${requestToken}` },
-        signal,
-      }),
-    catch: (cause) =>
-      new AuthenticationFailed({
-        operation: "request GitHub Actions OIDC assertion",
-        reason: cause instanceof Error ? cause.message : String(cause),
-      }),
-  })
-  if (!response.ok) {
-    return yield* new AuthenticationFailed({
-      operation: "request GitHub Actions OIDC assertion",
-      reason: `HTTP ${response.status}`,
-    })
-  }
-  const payload = yield* Effect.tryPromise({
-    try: () => response.json(),
-    catch: (cause) =>
-      new AuthenticationFailed({
-        operation: "decode GitHub Actions OIDC assertion",
-        reason: cause instanceof Error ? cause.message : String(cause),
-      }),
-  })
+  const payload = yield* withAssertionDeadline(
+    "request GitHub Actions OIDC assertion",
+    Effect.tryPromise({
+      try: async (signal) => {
+        const response = await fetch(url, {
+          headers: { authorization: `Bearer ${requestToken}` },
+          signal,
+        })
+        if (!response.ok) {
+          throw new AuthenticationFailed({
+            operation: "request GitHub Actions OIDC assertion",
+            reason: `HTTP ${response.status}`,
+          })
+        }
+        try {
+          return await response.json()
+        } catch (cause) {
+          throw new AuthenticationFailed({
+            operation: "decode GitHub Actions OIDC assertion",
+            reason: cause instanceof Error ? cause.message : String(cause),
+          })
+        }
+      },
+      catch: (cause) =>
+        cause instanceof AuthenticationFailed
+          ? cause
+          : new AuthenticationFailed({
+              operation: "request GitHub Actions OIDC assertion",
+              reason: cause instanceof Error ? cause.message : String(cause),
+            }),
+    }),
+  )
   const decoded = yield* Schema.decodeUnknownEffect(
     Schema.Struct({ value: Schema.NonEmptyString }),
   )(payload).pipe(
@@ -144,12 +168,15 @@ export const environmentAssertionLayer = (
     }),
   )
 
-const browserCommand = (url: string): Array<string> => {
-  switch (process.platform) {
+export const browserCommand = (
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+): Array<string> => {
+  switch (platform) {
     case "darwin":
       return ["open", url]
     case "win32":
-      return ["cmd.exe", "/c", "start", "", url]
+      return ["rundll32.exe", "url.dll,FileProtocolHandler", url]
     default:
       return ["xdg-open", url]
   }
@@ -205,16 +232,19 @@ export const localAuthorizationCodeReceiverLayer: Layer.Layer<AuthorizationCodeR
                     const callback = new URL(incoming.url)
                     if (callback.pathname !== redirect.pathname)
                       return new Response("Not found", { status: 404 })
+                    const state = callback.searchParams.get("state")
+                    if (state !== expectedState) {
+                      return new Response("Invalid authorization callback.", { status: 400 })
+                    }
                     const error = callback.searchParams.get("error")
                     const code = callback.searchParams.get("code")
-                    const state = callback.searchParams.get("state")
                     if (error !== null) {
                       pending.reject(new Error(error))
                       return new Response("Authorization failed. You can close this window.", {
                         status: 400,
                       })
                     }
-                    if (code === null || state === null || state !== expectedState) {
+                    if (code === null) {
                       pending.reject(new Error("invalid authorization callback"))
                       return new Response("Invalid authorization callback.", { status: 400 })
                     }
@@ -260,7 +290,7 @@ export const localAuthorizationCodeReceiverLayer: Layer.Layer<AuthorizationCodeR
                   }),
                 )
               }),
-            (server) => Effect.sync(() => server.stop(true)),
+            (server) => Effect.promise(() => server.stop()),
           ).pipe(
             Effect.mapError((error) =>
               error instanceof AuthenticationFailed

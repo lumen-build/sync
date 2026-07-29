@@ -4,7 +4,7 @@ import { dirname } from "node:path"
 import { Effect, Schema } from "effect"
 
 import { prepareConfiguration, prepareRemoval } from "./configuration"
-import { Harness, managedPathKey, managedValuesEqual, type ManagedChange } from "./model"
+import { Harness, managedPathKey, type ManagedChange } from "./model"
 import type { HarnessPaths } from "./paths"
 
 const ManagedValueSchema = Schema.Union([
@@ -147,18 +147,22 @@ export const configureHarness = Effect.fn("HarnessLifecycle.configure")(function
 
   yield* writeAtomic(path, prepared.contents, snapshot?.mode ?? 0o600)
   const previousRecord = ownership.records.find((candidate) => candidate.harness === harness)
-  const ownedChanges = prepared.changes.map((change) => {
-    const previous = previousRecord?.changes.find(
-      (candidate) =>
-        managedPathKey(candidate.path) === managedPathKey(change.path) &&
-        managedValuesEqual(candidate.after, change.before),
-    )
-    return previous === undefined ? change : { ...change, before: previous.before }
-  })
+  const changesByPath = new Map(
+    prepared.changes.map((change) => [managedPathKey(change.path), change]),
+  )
+  const retainedChanges =
+    previousRecord?.changes.map((previous) => {
+      const key = managedPathKey(previous.path)
+      const change = changesByPath.get(key)
+      if (change === undefined) return previous
+      changesByPath.delete(key)
+      return { ...change, before: previous.before }
+    }) ?? []
+  const ownedChanges = [...retainedChanges, ...changesByPath.values()]
   const record = {
     changes: ownedChanges,
     collectorUrl,
-    hadOriginal: snapshot !== undefined,
+    hadOriginal: previousRecord?.hadOriginal ?? snapshot !== undefined,
     harness,
     path,
   }
