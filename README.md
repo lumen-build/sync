@@ -94,7 +94,8 @@ export LUMEN_COLLECTOR_LISTEN_URL="http://127.0.0.1:4318"
 export LUMEN_DESTINATION_BASE_URL="https://usage.lumen.build"
 ```
 
-Plain HTTP is rejected except for loopback collector and OIDC callback URLs.
+Plain HTTP is rejected except for loopback URLs used by the collector, a local
+destination, or local OIDC issuer/callback testing.
 
 ### OIDC
 
@@ -186,7 +187,7 @@ The listener must be an explicit HTTP loopback URL. OTLP/HTTP JSON and protobuf 
 - `POST /v1/metrics`
 - `POST /v1/traces`
 
-Known native harnesses use token metrics as their live usage authority, which avoids counting the same inference again when a harness emits both an event and a metric. OpenCode uses usage-only logs. Events are fingerprinted, aggregated by UTC day/agent/provider/model, and uploaded as revisioned `otel-live` snapshots.
+Known native harnesses use token metrics as their live usage authority, which avoids counting the same inference again when a harness emits both an event and a metric. OpenCode uses usage-only logs. Events are fingerprinted, aggregated by UTC day/agent/provider/model, and uploaded as revisioned `otel-live` snapshots. Fingerprints follow the 45-day live retention window and are capped at 100,000 entries; a replay after its fingerprint has expired or been evicted is outside the deduplication guarantee.
 
 After a successful upload, the CLI writes the collector's cumulative buckets,
 revisions, and deduplication fingerprints to a mode-`0600` checkpoint beside
@@ -236,7 +237,7 @@ illustrative, mocked test URL, not a hosted service or default.
 
 All four routes:
 
-- use the configured HTTPS base URL;
+- use the configured HTTPS base URL, or an HTTP loopback URL for local testing;
 - send `Accept: application/json`;
 - send `Authorization: Bearer <access-token>`; and
 - require a 2xx response with the JSON shape shown below.
