@@ -95,6 +95,13 @@
         "effect": "4.0.0-beta.102",
       },
     },
+    "packages/service": {
+      "name": "@lumen-build/sync-service",
+      "version": "0.0.0",
+      "dependencies": {
+        "effect": "4.0.0-beta.102",
+      },
+    },
   },
   "packages": {
     "@ccusage/ccusage-darwin-arm64": ["@ccusage/ccusage-darwin-arm64@20.0.19", "", { "os": "darwin", "cpu": "arm64" }, "sha512-8b69h4tuMH1KNW+EYjFRJWpbWHXbMUtFu8cOCyFOQsR6lGxq37g0kzEGHSqG+iZEoUTHaabR5CE7ZHLhW9Q64A=="],
@@ -194,6 +201,8 @@
     "@lumen-build/sync-otlp": ["@lumen-build/sync-otlp@workspace:packages/otlp"],
 
     "@lumen-build/sync-reconciliation": ["@lumen-build/sync-reconciliation@workspace:packages/reconciliation"],
+
+    "@lumen-build/sync-service": ["@lumen-build/sync-service@workspace:packages/service"],
 
     "@msgpackr-extract/msgpackr-extract-darwin-arm64": ["@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ=="],
 

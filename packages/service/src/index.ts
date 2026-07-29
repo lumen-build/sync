@@ -1,0 +1,266 @@
+import { join, win32 } from "node:path"
+
+import { Effect, Schema } from "effect"
+
+export type ServicePlatform = "darwin" | "linux" | "win32"
+
+export interface ServiceHost {
+  readonly appData?: string
+  readonly configHome?: string
+  readonly home: string
+  readonly platform: ServicePlatform
+}
+
+export interface ServiceCommand {
+  readonly args: ReadonlyArray<string>
+  readonly executable: string
+}
+
+export interface ServiceDefinition {
+  readonly artifact: {
+    readonly contents: string
+    readonly mode: number
+    readonly path: string
+  }
+  readonly install: ReadonlyArray<ServiceCommand>
+  readonly logs: {
+    readonly stderr: string
+    readonly stdout: string
+  }
+  readonly uninstall: ReadonlyArray<ServiceCommand>
+}
+
+export interface DefinitionOptions {
+  readonly configPath: string
+  readonly executablePath: string
+  readonly host: ServiceHost
+}
+
+export class InvalidServiceDefinition extends Schema.TaggedErrorClass<InvalidServiceDefinition>()(
+  "InvalidServiceDefinition",
+  {
+    field: Schema.String,
+    reason: Schema.String,
+  },
+) {}
+
+const validatePath = (
+  field: string,
+  value: string,
+): Effect.Effect<string, InvalidServiceDefinition> =>
+  value.length === 0 || /[\u0000\r\n]/u.test(value)
+    ? Effect.fail(
+        new InvalidServiceDefinition({
+          field,
+          reason: "expected a non-empty path without control characters",
+        }),
+      )
+    : Effect.succeed(value)
+
+const configRoot = (host: ServiceHost): string =>
+  host.configHome ??
+  (host.platform === "win32"
+    ? (host.appData ?? win32.join(host.home, "AppData", "Roaming"))
+    : join(host.home, ".config"))
+
+const stateRoot = (host: ServiceHost): string =>
+  host.platform === "win32"
+    ? win32.join(configRoot(host), "lumen-build", "sync")
+    : join(configRoot(host), "lumen-build", "sync")
+
+const xml = (value: string): string =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;")
+
+const plist = (value: string): string => xml(value)
+
+const systemdArgument = (value: string): string =>
+  `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("$", "\\$")
+    .replaceAll("%", "%%")}"`
+
+const windowsArgument = (value: string): string => {
+  if (!/[\s"]/u.test(value)) return value
+  let output = '"'
+  let slashes = 0
+  for (const character of value) {
+    if (character === "\\") {
+      slashes += 1
+    } else if (character === '"') {
+      output += `${"\\".repeat(slashes * 2 + 1)}"`
+      slashes = 0
+    } else {
+      output += `${"\\".repeat(slashes)}${character}`
+      slashes = 0
+    }
+  }
+  return `${output}${"\\".repeat(slashes * 2)}"`
+}
+
+const launchdDefinition = (
+  executablePath: string,
+  configPath: string,
+  host: ServiceHost,
+): ServiceDefinition => {
+  const label = "build.lumen.sync"
+  const logs = {
+    stderr: join(stateRoot(host), "collector.stderr.log"),
+    stdout: join(stateRoot(host), "collector.stdout.log"),
+  }
+  const artifactPath = join(host.home, "Library", "LaunchAgents", `${label}.plist`)
+  const contents = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    "<dict>",
+    "  <key>Label</key>",
+    `  <string>${label}</string>`,
+    "  <key>ProgramArguments</key>",
+    "  <array>",
+    `    <string>${plist(executablePath)}</string>`,
+    "    <string>collector</string>",
+    "    <string>start</string>",
+    "    <string>--config</string>",
+    `    <string>${plist(configPath)}</string>`,
+    "  </array>",
+    "  <key>KeepAlive</key>",
+    "  <true/>",
+    "  <key>RunAtLoad</key>",
+    "  <true/>",
+    "  <key>StandardErrorPath</key>",
+    `  <string>${plist(logs.stderr)}</string>`,
+    "  <key>StandardOutPath</key>",
+    `  <string>${plist(logs.stdout)}</string>`,
+    "</dict>",
+    "</plist>",
+    "",
+  ].join("\n")
+
+  return {
+    artifact: { contents, mode: 0o600, path: artifactPath },
+    install: [
+      {
+        args: ["bootstrap", `gui/${process.getuid?.() ?? 0}`, artifactPath],
+        executable: "/bin/launchctl",
+      },
+    ],
+    logs,
+    uninstall: [
+      {
+        args: ["bootout", `gui/${process.getuid?.() ?? 0}`, artifactPath],
+        executable: "/bin/launchctl",
+      },
+    ],
+  }
+}
+
+const systemdDefinition = (
+  executablePath: string,
+  configPath: string,
+  host: ServiceHost,
+): ServiceDefinition => {
+  const serviceName = "lumen-sync.service"
+  const artifactPath = join(configRoot(host), "systemd", "user", serviceName)
+  const logs = {
+    stderr: "journalctl --user --unit lumen-sync.service",
+    stdout: "journalctl --user --unit lumen-sync.service",
+  }
+  const arguments_ = [executablePath, "collector", "start", "--config", configPath]
+    .map(systemdArgument)
+    .join(" ")
+  const contents = [
+    "[Unit]",
+    "Description=Lumen Sync local OTLP collector",
+    "After=network-online.target",
+    "",
+    "[Service]",
+    `ExecStart=${arguments_}`,
+    "Restart=on-failure",
+    "RestartSec=2",
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n")
+
+  return {
+    artifact: { contents, mode: 0o600, path: artifactPath },
+    install: [
+      { args: ["--user", "daemon-reload"], executable: "systemctl" },
+      { args: ["--user", "enable", "--now", serviceName], executable: "systemctl" },
+    ],
+    logs,
+    uninstall: [
+      { args: ["--user", "disable", "--now", serviceName], executable: "systemctl" },
+      { args: ["--user", "daemon-reload"], executable: "systemctl" },
+    ],
+  }
+}
+
+const windowsDefinition = (
+  executablePath: string,
+  configPath: string,
+  host: ServiceHost,
+): ServiceDefinition => {
+  const taskName = "Lumen Sync"
+  const root = stateRoot(host)
+  const artifactPath = win32.join(root, "lumen-sync-task.xml")
+  const logs = {
+    stderr: win32.join(root, "collector.stderr.log"),
+    stdout: win32.join(root, "collector.stdout.log"),
+  }
+  const arguments_ = ["collector", "start", "--config", configPath].map(windowsArgument).join(" ")
+  const contents = [
+    '<?xml version="1.0" encoding="UTF-16"?>',
+    '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+    "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
+    '  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>',
+    "  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><RestartOnFailure><Interval>PT2S</Interval><Count>3</Count></RestartOnFailure></Settings>",
+    '  <Actions Context="Author"><Exec>',
+    `    <Command>${xml(executablePath)}</Command>`,
+    `    <Arguments>${xml(arguments_)}</Arguments>`,
+    "  </Exec></Actions>",
+    "</Task>",
+    "",
+  ].join("\r\n")
+
+  return {
+    artifact: { contents, mode: 0o600, path: artifactPath },
+    install: [
+      {
+        args: ["/Create", "/TN", taskName, "/XML", artifactPath, "/F"],
+        executable: "schtasks.exe",
+      },
+    ],
+    logs,
+    uninstall: [
+      {
+        args: ["/Delete", "/TN", taskName, "/F"],
+        executable: "schtasks.exe",
+      },
+    ],
+  }
+}
+
+export const makeServiceDefinition = Effect.fn("ServiceDefinition.make")(function* ({
+  configPath,
+  executablePath,
+  host,
+}: DefinitionOptions) {
+  const executable = yield* validatePath("executablePath", executablePath)
+  const config = yield* validatePath("configPath", configPath)
+  switch (host.platform) {
+    case "darwin":
+      return launchdDefinition(executable, config, host)
+    case "linux":
+      return systemdDefinition(executable, config, host)
+    case "win32":
+      return windowsDefinition(executable, config, host)
+  }
+})
