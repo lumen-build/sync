@@ -1,3 +1,8 @@
+import { access, mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
 
@@ -128,8 +133,5 @@ it.effect("installs and uninstalls only through the command-runner port", () =>
       }).pipe(Effect.provide(runner))
     },
     (home) => Effect.promise(() => rm(home, { force: true, recursive: true })),
-  ),
+  ).pipe(Effect.provide(BunServices.layer)),
 )
-import { access, mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"

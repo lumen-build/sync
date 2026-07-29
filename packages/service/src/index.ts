@@ -1,7 +1,5 @@
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
-import { dirname, join, win32 } from "node:path"
-
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Crypto, Duration, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 export type ServicePlatform = "darwin" | "linux" | "win32"
 
@@ -10,6 +8,7 @@ export interface ServiceHost {
   readonly configHome?: string
   readonly home: string
   readonly platform: ServicePlatform
+  readonly userId?: number
 }
 
 export interface ServiceCommand {
@@ -81,16 +80,32 @@ const validatePath = (
       )
     : Effect.succeed(value)
 
+const joinHost = (platform: ServicePlatform, ...parts: ReadonlyArray<string>): string => {
+  const separator = platform === "win32" ? "\\" : "/"
+  return parts
+    .filter((part) => part.length > 0)
+    .map((part, index) =>
+      index === 0
+        ? part.replace(new RegExp(`${separator === "\\" ? "\\\\" : separator}+$`, "u"), "")
+        : part.replace(
+            new RegExp(
+              `^${separator === "\\" ? "\\\\" : separator}+|${separator === "\\" ? "\\\\" : separator}+$`,
+              "gu",
+            ),
+            "",
+          ),
+    )
+    .join(separator)
+}
+
 const configRoot = (host: ServiceHost): string =>
   host.configHome ??
   (host.platform === "win32"
-    ? (host.appData ?? win32.join(host.home, "AppData", "Roaming"))
-    : join(host.home, ".config"))
+    ? (host.appData ?? joinHost(host.platform, host.home, "AppData", "Roaming"))
+    : joinHost(host.platform, host.home, ".config"))
 
 const stateRoot = (host: ServiceHost): string =>
-  host.platform === "win32"
-    ? win32.join(configRoot(host), "lumen-build", "sync")
-    : join(configRoot(host), "lumen-build", "sync")
+  joinHost(host.platform, configRoot(host), "lumen-build", "sync")
 
 const xml = (value: string): string =>
   value
@@ -134,10 +149,16 @@ const launchdDefinition = (
 ): ServiceDefinition => {
   const label = "build.lumen.sync"
   const logs = {
-    stderr: join(stateRoot(host), "collector.stderr.log"),
-    stdout: join(stateRoot(host), "collector.stdout.log"),
+    stderr: joinHost(host.platform, stateRoot(host), "collector.stderr.log"),
+    stdout: joinHost(host.platform, stateRoot(host), "collector.stdout.log"),
   }
-  const artifactPath = join(host.home, "Library", "LaunchAgents", `${label}.plist`)
+  const artifactPath = joinHost(
+    host.platform,
+    host.home,
+    "Library",
+    "LaunchAgents",
+    `${label}.plist`,
+  )
   const contents = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -170,14 +191,14 @@ const launchdDefinition = (
     artifact: { contents, mode: 0o600, path: artifactPath },
     install: [
       {
-        args: ["bootstrap", `gui/${process.getuid?.() ?? 0}`, artifactPath],
+        args: ["bootstrap", `gui/${host.userId ?? 0}`, artifactPath],
         executable: "/bin/launchctl",
       },
     ],
     logs,
     uninstall: [
       {
-        args: ["bootout", `gui/${process.getuid?.() ?? 0}`, artifactPath],
+        args: ["bootout", `gui/${host.userId ?? 0}`, artifactPath],
         executable: "/bin/launchctl",
       },
     ],
@@ -190,7 +211,7 @@ const systemdDefinition = (
   host: ServiceHost,
 ): ServiceDefinition => {
   const serviceName = "lumen-sync.service"
-  const artifactPath = join(configRoot(host), "systemd", "user", serviceName)
+  const artifactPath = joinHost(host.platform, configRoot(host), "systemd", "user", serviceName)
   const logs = {
     stderr: "journalctl --user --unit lumen-sync.service",
     stdout: "journalctl --user --unit lumen-sync.service",
@@ -234,10 +255,10 @@ const windowsDefinition = (
 ): ServiceDefinition => {
   const taskName = "Lumen Sync"
   const root = stateRoot(host)
-  const artifactPath = win32.join(root, "lumen-sync-task.xml")
+  const artifactPath = joinHost(host.platform, root, "lumen-sync-task.xml")
   const logs = {
-    stderr: win32.join(root, "collector.stderr.log"),
-    stdout: win32.join(root, "collector.stdout.log"),
+    stderr: joinHost(host.platform, root, "collector.stderr.log"),
+    stdout: joinHost(host.platform, root, "collector.stdout.log"),
   }
   const commandArguments = ["collector", "start", "--config", configPath]
     .map(windowsArgument)
@@ -298,42 +319,33 @@ const lifecycleError = (operation: string, cause: unknown): ServiceLifecycleErro
   })
 
 const readArtifact = (path: string) =>
-  Effect.tryPromise({
-    try: async () => {
-      try {
-        return {
-          contents: await readFile(path, "utf8"),
-          mode: (await stat(path)).mode & 0o777,
-        }
-      } catch (cause) {
-        if (
-          typeof cause === "object" &&
-          cause !== null &&
-          "code" in cause &&
-          cause.code === "ENOENT"
-        ) {
-          return undefined
-        }
-        throw cause
-      }
-    },
-    catch: (cause) => lifecycleError("read service definition", cause),
-  })
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    if (!(yield* fs.exists(path))) return undefined
+    return {
+      contents: yield* fs.readFileString(path),
+      mode: (yield* fs.stat(path)).mode & 0o777,
+    }
+  }).pipe(Effect.mapError((cause) => lifecycleError("read service definition", cause)))
 
 const writeArtifact = (path: string, contents: string, mode: number) =>
-  Effect.tryPromise({
-    try: async () => {
-      const temporary = `${path}.${crypto.randomUUID()}.tmp`
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-      try {
-        await writeFile(temporary, contents, { mode })
-        await rename(temporary, path)
-      } finally {
-        await rm(temporary, { force: true })
-      }
-    },
-    catch: (cause) => lifecycleError("write service definition", cause),
-  })
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto
+    const fs = yield* FileSystem.FileSystem
+    const pathService = yield* Path.Path
+    const temporary = `${path}.${yield* crypto.randomUUIDv4}.tmp`
+    yield* fs.makeDirectory(pathService.dirname(path), {
+      recursive: true,
+      mode: 0o700,
+    })
+    yield* fs
+      .writeFileString(temporary, contents, { flag: "wx", mode })
+      .pipe(
+        Effect.andThen(fs.rename(temporary, path)),
+        Effect.andThen(fs.chmod(path, mode)),
+        Effect.ensuring(fs.remove(temporary, { force: true }).pipe(Effect.ignore)),
+      )
+  }).pipe(Effect.mapError((cause) => lifecycleError("write service definition", cause)))
 
 const runCommands = Effect.fn("ServiceLifecycle.runCommands")(function* (
   commands: ReadonlyArray<ServiceCommand>,
@@ -362,10 +374,10 @@ export const installService = Effect.fn("ServiceLifecycle.install")(function* (
   yield* runCommands(definition.install).pipe(
     Effect.catch((error) =>
       (previous === undefined
-        ? Effect.tryPromise({
-            try: () => rm(definition.artifact.path, { force: true }),
-            catch: () => error,
-          })
+        ? FileSystem.FileSystem.pipe(
+            Effect.flatMap((fs) => fs.remove(definition.artifact.path, { force: true })),
+            Effect.mapError(() => error),
+          )
         : writeArtifact(definition.artifact.path, previous.contents, previous.mode)
       ).pipe(Effect.andThen(Effect.fail(error))),
     ),
@@ -377,31 +389,71 @@ export const uninstallService = Effect.fn("ServiceLifecycle.uninstall")(function
 ) {
   const [stop, ...afterRemoval] = definition.uninstall
   if (stop !== undefined) yield* runCommands([stop])
-  yield* Effect.tryPromise({
-    try: () => rm(definition.artifact.path, { force: true }),
-    catch: (cause) => lifecycleError("remove service definition", cause),
-  })
+  const fs = yield* FileSystem.FileSystem
+  yield* fs
+    .remove(definition.artifact.path, { force: true })
+    .pipe(Effect.mapError((cause) => lifecycleError("remove service definition", cause)))
   yield* runCommands(afterRemoval)
 })
 
-export const liveServiceCommandRunnerLayer: Layer.Layer<ServiceCommandRunner> = Layer.succeed(
+const collectText = (stream: Stream.Stream<Uint8Array, unknown>) =>
+  stream.pipe(
+    Stream.decodeText(),
+    Stream.runFold(
+      () => "",
+      (output, chunk) => output + chunk,
+    ),
+  )
+
+const SERVICE_COMMAND_TIMEOUT = Duration.seconds(30)
+
+export const liveServiceCommandRunnerLayer: Layer.Layer<
   ServiceCommandRunner,
-  ServiceCommandRunner.of({
-    run: Effect.fn("ServiceCommandRunner.live")(function* ({ args, executable }) {
-      const child = yield* Effect.try({
-        try: () => Bun.spawn([executable, ...args], { stderr: "pipe", stdout: "pipe" }),
-        catch: (cause) => lifecycleError(`start ${executable}`, cause),
-      })
-      const [exitCode, stderr, stdout] = yield* Effect.tryPromise({
-        try: () =>
-          Promise.all([
-            child.exited,
-            new Response(child.stderr).text(),
-            new Response(child.stdout).text(),
-          ]),
-        catch: (cause) => lifecycleError(`run ${executable}`, cause),
-      })
-      return { exitCode, stderr, stdout }
-    }),
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> = Layer.effect(
+  ServiceCommandRunner,
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+    return ServiceCommandRunner.of({
+      run: Effect.fn("ServiceCommandRunner.live")(function* ({ args, executable }) {
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const child = yield* spawner.spawn(
+              ChildProcess.make(executable, args, {
+                stderr: "pipe",
+                stdout: "pipe",
+              }),
+            )
+            const result = yield* Effect.all(
+              {
+                exitCode: child.exitCode,
+                stderr: collectText(child.stderr),
+                stdout: collectText(child.stdout),
+              },
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.timeoutOrElse({
+                duration: SERVICE_COMMAND_TIMEOUT,
+                orElse: () =>
+                  Effect.fail(
+                    new ServiceLifecycleError({
+                      operation: `run ${executable}`,
+                      reason: "timed out after 30 seconds",
+                    }),
+                  ),
+              }),
+            )
+            return { ...result, exitCode: Number(result.exitCode) }
+          }),
+        ).pipe(
+          Effect.mapError((cause) =>
+            cause instanceof ServiceLifecycleError
+              ? cause
+              : lifecycleError(`run ${executable}`, cause),
+          ),
+        )
+      }),
+    })
   }),
 )

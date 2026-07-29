@@ -87,6 +87,7 @@ const hostPaths = () => ({
   ...(environment.COPILOT_HOME === undefined ? {} : { copilotHome: environment.COPILOT_HOME }),
   home: homedir(),
   platform: process.platform as "darwin" | "linux" | "win32",
+  ...(process.getuid === undefined ? {} : { userId: process.getuid() }),
 })
 
 const credentialLayer = (
