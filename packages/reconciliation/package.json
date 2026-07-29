@@ -1,0 +1,16 @@
+{
+  "name": "@lumen-build/sync-reconciliation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lumen-build/sync-contracts": "workspace:*",
+    "effect": "4.0.0-beta.102"
+  }
+}

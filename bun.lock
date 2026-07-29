@@ -22,6 +22,14 @@
         "effect": "4.0.0-beta.102",
       },
     },
+    "packages/reconciliation": {
+      "name": "@lumen-build/sync-reconciliation",
+      "version": "0.0.0",
+      "dependencies": {
+        "@lumen-build/sync-contracts": "workspace:*",
+        "effect": "4.0.0-beta.102",
+      },
+    },
   },
   "packages": {
     "@effect/vitest": ["@effect/vitest@4.0.0-beta.102", "", { "peerDependencies": { "effect": "^4.0.0-beta.102", "vitest": "^3.0.0 || ^4.0.0" } }, "sha512-4dipFAYG6imOzrY3zy3BgzCJkbb9xESyzUef0WSx8bsK0/SpITqbJpdwKeOyDWLZ+rimjua8IbTFMAde865pIQ=="],
@@ -81,6 +89,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
     "@lumen-build/sync-contracts": ["@lumen-build/sync-contracts@workspace:packages/contracts"],
+
+    "@lumen-build/sync-reconciliation": ["@lumen-build/sync-reconciliation@workspace:packages/reconciliation"],
 
     "@msgpackr-extract/msgpackr-extract-darwin-arm64": ["@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ=="],
 
