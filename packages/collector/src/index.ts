@@ -198,6 +198,7 @@ const extractTokens = (attributes: Attributes): UsageTokens => ({
       "gen_ai.usage.cache_read_input_tokens",
       "cache_read_input_tokens",
       "cached_input_tokens",
+      "cached_content_token_count",
       "cached_token_count",
     ]) ?? 0,
   input:
@@ -219,8 +220,9 @@ const extractTokens = (attributes: Attributes): UsageTokens => ({
       "gen_ai.usage.reasoning_tokens",
       "reasoning_output_tokens",
       "reasoning_token_count",
+      "thoughts_token_count",
     ]) ?? 0,
-  tool: attributes.number(["gen_ai.usage.tool_tokens", "tool_tokens"]) ?? 0,
+  tool: attributes.number(["gen_ai.usage.tool_tokens", "tool_tokens", "tool_token_count"]) ?? 0,
 })
 
 const tokensPresent = (tokens: UsageTokens): boolean =>
@@ -241,7 +243,9 @@ const tokenField = (tokenType: string): TokenField | undefined => {
   if (normalized.includes("cache") || normalized.includes("cached")) {
     return "cacheReadInput"
   }
-  if (normalized.includes("reason")) return "reasoningOutput"
+  if (normalized.includes("reason") || normalized.includes("thought")) {
+    return "reasoningOutput"
+  }
   if (normalized.includes("tool")) return "tool"
   if (normalized.includes("output") || normalized.includes("completion")) {
     return "output"
