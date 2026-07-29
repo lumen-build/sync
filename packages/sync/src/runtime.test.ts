@@ -138,9 +138,11 @@ it.effect("restores and replays the original daily batch after a lost commit res
         yield* syncDaily({ ...options, syncIds: firstJournal }).pipe(Effect.flip)
         const pending = yield* Effect.promise(() => readdir(directory))
         expect(pending).toHaveLength(1)
-        expect((yield* Effect.promise(() => stat(join(directory, pending[0]!)))).mode & 0o777).toBe(
-          0o600,
-        )
+        if (process.platform !== "win32") {
+          expect(
+            (yield* Effect.promise(() => stat(join(directory, pending[0]!)))).mode & 0o777,
+          ).toBe(0o600)
+        }
 
         const secondJournal = journals.make(directory)
         const result = yield* syncDaily({

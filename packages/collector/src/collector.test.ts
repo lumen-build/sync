@@ -320,7 +320,9 @@ it.effect("restores acknowledged revisions and fingerprints from a private check
           yield* store.checkpoint
         }).pipe(Effect.provide(layer()))
 
-        expect((yield* Effect.promise(() => stat(statePath))).mode & 0o777).toBe(0o600)
+        if (process.platform !== "win32") {
+          expect((yield* Effect.promise(() => stat(statePath))).mode & 0o777).toBe(0o600)
+        }
 
         yield* Effect.gen(function* () {
           const store = yield* LiveUsageStore

@@ -33,7 +33,9 @@ test("persists one private device identity across runs", () =>
 
     expect(second).toBe(first)
     expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u)
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (process.platform !== "win32") {
+      expect((await stat(path)).mode & 0o777).toBe(0o600)
+    }
   }))
 
 test.skipIf(process.platform === "win32")("rejects a symlinked device identity", () =>
