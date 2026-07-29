@@ -23,14 +23,6 @@ const isSecureOrLoopbackUrl = (value: string): boolean => {
   )
 }
 
-const isLoopbackRedirect = (value: string): boolean => {
-  const url = parseUrl(value)
-  return (
-    url !== undefined &&
-    (url.protocol === "https:" || (url.protocol === "http:" && loopbackHosts.has(url.hostname)))
-  )
-}
-
 export const NetworkUrl = Schema.NonEmptyString.check(
   Schema.makeFilter(isSecureOrLoopbackUrl, {
     message: "expected an HTTPS URL or an HTTP loopback URL",
@@ -59,7 +51,7 @@ export const CollectorListenUrl = Schema.NonEmptyString.check(
 )
 
 export const RedirectUrl = Schema.NonEmptyString.check(
-  Schema.makeFilter(isLoopbackRedirect, {
+  Schema.makeFilter(isSecureOrLoopbackUrl, {
     message: "expected an HTTPS or loopback redirect URL",
   }),
 )
@@ -372,40 +364,47 @@ export const resolveRuntimePaths = ({
       : dirnameHost(host.platform, configPath)
   const configFile = configPath ?? joinHost(host.platform, configDirectory, "config.toml")
   const explicit = configPath !== undefined
-  const dataDirectory = explicit
-    ? configDirectory
-    : host.platform === "win32"
-      ? joinHost(
-          host.platform,
-          host.localAppData ?? joinHost(host.platform, host.homeDirectory, "AppData", "Local"),
-          "lumen-build",
-          "sync",
-        )
-      : host.platform === "darwin"
-        ? joinHost(
-            host.platform,
-            host.homeDirectory,
-            "Library",
-            "Application Support",
-            "lumen-build",
-            "sync",
-          )
-        : joinHost(
-            host.platform,
-            host.dataHome ?? joinHost(host.platform, host.homeDirectory, ".local", "share"),
-            "lumen-build",
-            "sync",
-          )
-  const stateDirectory = explicit
-    ? joinHost(host.platform, configDirectory, "state")
-    : host.platform === "win32" || host.platform === "darwin"
-      ? dataDirectory
-      : joinHost(
-          host.platform,
-          host.stateHome ?? joinHost(host.platform, host.homeDirectory, ".local", "state"),
-          "lumen-build",
-          "sync",
-        )
+  let dataDirectory: string
+  if (explicit) {
+    dataDirectory = configDirectory
+  } else if (host.platform === "win32") {
+    dataDirectory = joinHost(
+      host.platform,
+      host.localAppData ?? joinHost(host.platform, host.homeDirectory, "AppData", "Local"),
+      "lumen-build",
+      "sync",
+    )
+  } else if (host.platform === "darwin") {
+    dataDirectory = joinHost(
+      host.platform,
+      host.homeDirectory,
+      "Library",
+      "Application Support",
+      "lumen-build",
+      "sync",
+    )
+  } else {
+    dataDirectory = joinHost(
+      host.platform,
+      host.dataHome ?? joinHost(host.platform, host.homeDirectory, ".local", "share"),
+      "lumen-build",
+      "sync",
+    )
+  }
+
+  let stateDirectory: string
+  if (explicit) {
+    stateDirectory = joinHost(host.platform, configDirectory, "state")
+  } else if (host.platform === "win32" || host.platform === "darwin") {
+    stateDirectory = dataDirectory
+  } else {
+    stateDirectory = joinHost(
+      host.platform,
+      host.stateHome ?? joinHost(host.platform, host.homeDirectory, ".local", "state"),
+      "lumen-build",
+      "sync",
+    )
+  }
   return {
     collectorStateFile: joinHost(host.platform, stateDirectory, "collector.json"),
     configDirectory,

@@ -4,28 +4,9 @@ import { Context, Effect, Layer, Redacted, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { createRemoteJWKSet, jwtVerify } from "jose"
 
+import { AUTHENTICATION_REQUEST_TIMEOUT_MILLIS, withAuthenticationDeadline } from "./deadline.js"
 import { AuthenticationFailed } from "./errors.js"
 import { discover } from "./oidc-client.js"
-
-const AUTHENTICATOR_REQUEST_TIMEOUT = "30 seconds"
-const AUTHENTICATOR_REQUEST_TIMEOUT_MILLIS = 30_000
-
-const withAuthenticationDeadline = <A, R>(
-  operation: string,
-  request: Effect.Effect<A, AuthenticationFailed, R>,
-): Effect.Effect<A, AuthenticationFailed, R> =>
-  request.pipe(
-    Effect.timeoutOrElse({
-      duration: AUTHENTICATOR_REQUEST_TIMEOUT,
-      orElse: () =>
-        Effect.fail(
-          new AuthenticationFailed({
-            operation,
-            reason: `timed out after ${AUTHENTICATOR_REQUEST_TIMEOUT}`,
-          }),
-        ),
-    }),
-  )
 
 export interface Interface {
   readonly authenticate: (
@@ -59,7 +40,7 @@ export const oidcJwtAuthenticatorLayer = ({
         discover(configuredIssuer),
       )
       const jwks = createRemoteJWKSet(new URL(discovery.jwks_uri), {
-        timeoutDuration: AUTHENTICATOR_REQUEST_TIMEOUT_MILLIS,
+        timeoutDuration: AUTHENTICATION_REQUEST_TIMEOUT_MILLIS,
       })
 
       const authenticate = Effect.fn("RequestAuthenticator.oidcJwt.authenticate")(function* (

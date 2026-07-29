@@ -285,6 +285,72 @@ it.effect("bounds live fingerprint retention and prunes old buckets", () =>
   ),
 )
 
+it.effect("rejects bucket-limit overflow atomically and remains usable", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+    const first = usageEvent("first", timestamp)
+
+    expect(yield* store.ingest([first])).toBe(1)
+    expect(
+      yield* Effect.result(
+        store.ingest([
+          usageEvent("update", "2026-07-29T10:01:00.000Z", 2),
+          {
+            ...usageEvent("second-bucket", "2026-07-29T10:01:00.000Z", 3),
+            model: "another-model",
+          },
+        ]),
+      ),
+    ).toMatchObject({
+      _tag: "Failure",
+      failure: {
+        reason: "live usage bucket limit exceeded (1)",
+      },
+    })
+
+    expect(yield* store.generation).toBe(1)
+    expect((yield* store.snapshot("2026-07-29T10:02:00.000Z")).snapshots).toMatchObject([
+      {
+        revision: 1,
+        tokens: { input: 1 },
+      },
+    ])
+
+    expect(yield* store.ingest([usageEvent("after-rejection", "2026-07-29T10:03:00.000Z")])).toBe(1)
+    expect((yield* store.snapshot("2026-07-29T10:04:00.000Z")).snapshots[0]).toMatchObject({
+      revision: 2,
+      tokens: { input: 2 },
+    })
+  }).pipe(
+    Effect.provide(
+      collectorLayer({
+        deviceId,
+        maxBodyBytes: 1_000_000,
+        maxBuckets: 1,
+      }),
+    ),
+  ),
+)
+
+it.effect("ignores events outside retention without advancing the generation", () =>
+  Effect.gen(function* () {
+    const store = yield* LiveUsageStore
+
+    expect(yield* store.ingest([usageEvent("current", "2026-07-03T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.ingest([usageEvent("stale", "2026-07-01T00:00:00.000Z")])).toBe(1)
+    expect(yield* store.generation).toBe(1)
+    expect(yield* store.snapshotAfter("2026-07-03T00:01:00.000Z", 1)).toBeUndefined()
+  }).pipe(
+    Effect.provide(
+      collectorLayer({
+        deviceId,
+        maxBodyBytes: 1_000_000,
+        retentionDays: 2,
+      }),
+    ),
+  ),
+)
+
 it.effect("retains exactly 45 days and expires fingerprints with their day partition", () =>
   Effect.gen(function* () {
     const store = yield* LiveUsageStore
@@ -530,5 +596,27 @@ it.effect("rejects chunked and decompressed bodies at the configured byte limit"
       }),
     )
     expect(decompressionBomb.status).toBe(413)
+  }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 100 }))),
+)
+
+it.effect("rejects unsupported content encoding before accessing the request body", () =>
+  Effect.gen(function* () {
+    const collector = yield* Collector
+    let bodyAccessed = false
+    const request = {
+      get body() {
+        bodyAccessed = true
+        throw new Error("body must not be accessed")
+      },
+      headers: new Headers({
+        "content-encoding": "br",
+        "content-type": "application/json",
+      }),
+      method: "POST",
+      url: "https://collector.lumen.build/v1/logs",
+    } as unknown as Request
+
+    expect((yield* collector.handle(request)).status).toBe(415)
+    expect(bodyAccessed).toBe(false)
   }).pipe(Effect.provide(collectorLayer({ deviceId, maxBodyBytes: 100 }))),
 )

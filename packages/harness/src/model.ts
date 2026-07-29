@@ -94,15 +94,20 @@ export interface HarnessStatus {
   readonly state: HarnessStatusState
 }
 
-export type ManagedValue =
-  | { readonly _tag: "Absent" }
-  | { readonly _tag: "Present"; readonly value: Schema.Json }
+export const ManagedValue = Schema.Union([
+  Schema.TaggedStruct("Absent", {}),
+  Schema.TaggedStruct("Present", { value: Schema.Json }),
+])
 
-export interface ManagedChange {
-  readonly after: ManagedValue
-  readonly before: ManagedValue
-  readonly path: ReadonlyArray<string>
-}
+export type ManagedValue = typeof ManagedValue.Type
+
+export const ManagedChange = Schema.Struct({
+  after: ManagedValue,
+  before: ManagedValue,
+  path: Schema.Array(Schema.String),
+})
+
+export type ManagedChange = typeof ManagedChange.Type
 
 const jsonEqual = Schema.toEquivalence(Schema.Json)
 

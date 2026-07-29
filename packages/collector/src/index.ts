@@ -20,26 +20,30 @@ import {
 } from "@lumen-build/sync-contracts"
 import {
   OtlpCodec,
+  OtlpSignal,
   type DecodedTelemetry,
   type OtlpEncoding,
   type OtlpMetric,
-  type OtlpSignal,
   type OtlpValue,
   encodingFromContentType,
   layer as otlpLayer,
 } from "@lumen-build/sync-otlp"
 import { Context, Crypto, Effect, FileSystem, Layer, Path, Ref, Schema, Scope } from "effect"
 
-export interface UsageEvent {
-  readonly agent: UsageSnapshot["agent"]
-  readonly fingerprint: string
-  readonly model: string
-  readonly occurredAt: string
-  readonly provider: string
-  readonly sourceName: string
-  readonly sourceSignal: OtlpSignal
-  readonly tokens: UsageTokens
-}
+const Fingerprint = Schema.NonEmptyString.check(Schema.isMaxLength(512))
+
+export const UsageEvent = Schema.Struct({
+  agent: UsageAgentSchema,
+  fingerprint: Fingerprint,
+  model: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
+  occurredAt: UtcTimestamp,
+  provider: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
+  sourceName: Schema.String,
+  sourceSignal: OtlpSignal,
+  tokens: UsageTokensSchema,
+})
+
+export type UsageEvent = typeof UsageEvent.Type
 
 export class NormalizationError extends Schema.TaggedErrorClass<NormalizationError>()(
   "NormalizationError",
@@ -505,20 +509,7 @@ interface StoreState {
   seen: Map<string, string>
 }
 
-const Fingerprint = Schema.NonEmptyString.check(Schema.isMaxLength(512))
-
-const UsageEventSchema = Schema.Struct({
-  agent: UsageAgentSchema,
-  fingerprint: Fingerprint,
-  model: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
-  occurredAt: UtcTimestamp,
-  provider: Schema.NonEmptyString.check(Schema.isMaxLength(256)),
-  sourceName: Schema.String,
-  sourceSignal: Schema.Literals(["logs", "metrics", "traces"]),
-  tokens: UsageTokensSchema,
-})
-
-const isUsageEvent = Schema.is(UsageEventSchema)
+const isUsageEvent = Schema.is(UsageEvent)
 const isOtelUsageSnapshot = Schema.is(OtelUsageSnapshotSchema)
 
 const StoreCheckpoint = Schema.Struct({
@@ -666,17 +657,16 @@ const persistStoreState = (
 }
 
 const checkedAddUsageTokens = (left: UsageTokens, right: UsageTokens): UsageTokens | undefined => {
-  const result = {
-    cacheCreationInput: left.cacheCreationInput + right.cacheCreationInput,
-    cacheReadInput: left.cacheReadInput + right.cacheReadInput,
-    input: left.input + right.input,
-    output: left.output + right.output,
-    reasoningOutput: left.reasoningOutput + right.reasoningOutput,
-    tool: left.tool + right.tool,
-  }
-  return Object.values(result).every((value) => Number.isSafeInteger(value) && value >= 0)
-    ? result
-    : undefined
+  const result = addUsageTokens(left, right)
+  const values: ReadonlyArray<number> = [
+    result.cacheCreationInput,
+    result.cacheReadInput,
+    result.input,
+    result.output,
+    result.reasoningOutput,
+    result.tool,
+  ]
+  return values.every((value) => Number.isSafeInteger(value) && value >= 0) ? result : undefined
 }
 
 const retentionCutoff = (latestDay: string, retentionDays: number): string => {
@@ -762,6 +752,7 @@ type IngestResult =
 const storeLayer = (
   deviceId: string,
   retentionDays: number,
+  maxBuckets: number,
   maxFingerprints: number,
   statePath: string | undefined,
 ) =>
@@ -859,6 +850,28 @@ const storeLayer = (
             pendingBuckets.set(key, bucket)
           }
 
+          if (pendingBuckets.size === 0) {
+            return [{ status: "success", accepted: accepted.length }, current]
+          }
+
+          const retainedBucketCount = [...current.buckets.values()].filter(
+            ({ snapshot }) => snapshot.day >= cutoff,
+          ).length
+          const newBucketCount = [...pendingBuckets.keys()].filter(
+            (key) => !current.buckets.has(key),
+          ).length
+          if (retainedBucketCount + newBucketCount > maxBuckets) {
+            return [
+              {
+                status: "failure",
+                error: new LiveUsageStoreError({
+                  reason: `live usage bucket limit exceeded (${maxBuckets})`,
+                }),
+              },
+              current,
+            ]
+          }
+
           expireBefore(current, latestDay, retentionDays)
 
           for (const { day, event } of accepted) {
@@ -890,18 +903,18 @@ const storeLayer = (
         return result.accepted
       })
 
-      const decodeSnapshot = (capturedAt: string, current: StoreState) =>
-        Schema.decodeUnknownEffect(OtelLiveBatchSchema)({
-          source: "otel-live",
-          capturedAt,
-          costs: [],
-          deviceId,
-          snapshots: [...current.buckets.values()]
-            .map(versionedSnapshot)
-            .toSorted((left, right) =>
-              usageSnapshotKey(left).localeCompare(usageSnapshotKey(right)),
-            ),
-        }).pipe(
+      const snapshotInput = (capturedAt: string, current: StoreState) => ({
+        source: "otel-live" as const,
+        capturedAt,
+        costs: [],
+        deviceId,
+        snapshots: [...current.buckets.values()]
+          .map(versionedSnapshot)
+          .toSorted((left, right) => usageSnapshotKey(left).localeCompare(usageSnapshotKey(right))),
+      })
+
+      const decodeSnapshot = (input: ReturnType<typeof snapshotInput>) =>
+        Schema.decodeUnknownEffect(OtelLiveBatchSchema)(input).pipe(
           Effect.mapError(
             (error) =>
               new LiveUsageStoreError({
@@ -911,19 +924,31 @@ const storeLayer = (
         )
 
       const snapshot = Effect.fn("LiveUsageStore.snapshot")(function* (capturedAt: string) {
-        const current = yield* Ref.get(state)
-        return yield* decodeSnapshot(capturedAt, current)
+        const input = yield* Ref.modify(state, (current) => [
+          snapshotInput(capturedAt, current),
+          current,
+        ])
+        return yield* decodeSnapshot(input)
       })
 
       const snapshotAfter = Effect.fn("LiveUsageStore.snapshotAfter")(function* (
         capturedAt: string,
         generation: number,
       ) {
-        const current = yield* Ref.get(state)
-        if (current.generation <= generation) return undefined
-        const capturedGeneration = current.generation
-        const batch = yield* decodeSnapshot(capturedAt, current)
-        return { batch, generation: capturedGeneration }
+        const captured = yield* Ref.modify(state, (current) => [
+          current.generation <= generation
+            ? undefined
+            : {
+                generation: current.generation,
+                input: snapshotInput(capturedAt, current),
+              },
+          current,
+        ])
+        if (captured === undefined) return undefined
+        return {
+          batch: yield* decodeSnapshot(captured.input),
+          generation: captured.generation,
+        }
       })
 
       return LiveUsageStore.of({
@@ -942,6 +967,7 @@ const storeLayer = (
 
 export interface CollectorOptions {
   readonly deviceId: string
+  readonly maxBuckets?: number
   readonly maxFingerprints?: number
   readonly maxBodyBytes: number
   readonly retentionDays?: number
@@ -1046,6 +1072,16 @@ const makeCollectorLayer = (maxBodyBytes: number) =>
             return new Response("unsupported media type", { status: 415 })
           }
           const encoding = encodingResult.success
+          const contentEncoding = (
+            request.headers.get("content-encoding") ?? "identity"
+          ).toLowerCase()
+          if (
+            contentEncoding !== "gzip" &&
+            contentEncoding !== "identity" &&
+            contentEncoding !== ""
+          ) {
+            return new Response("unsupported content encoding", { status: 415 })
+          }
 
           const rawResult = yield* Effect.promise(() => readLimited(request.body, maxBodyBytes))
           if (rawResult._tag === "TooLarge") {
@@ -1055,9 +1091,6 @@ const makeCollectorLayer = (maxBodyBytes: number) =>
             return new Response("invalid request body", { status: 400 })
           }
           let body = rawResult.body
-          const contentEncoding = (
-            request.headers.get("content-encoding") ?? "identity"
-          ).toLowerCase()
           if (contentEncoding === "gzip") {
             const decoded = yield* Effect.promise(() => decodeGzip(body, maxBodyBytes))
             if (decoded._tag === "TooLarge") {
@@ -1067,8 +1100,6 @@ const makeCollectorLayer = (maxBodyBytes: number) =>
               return new Response("invalid gzip body", { status: 400 })
             }
             body = decoded.body
-          } else if (contentEncoding !== "identity" && contentEncoding !== "") {
-            return new Response("unsupported content encoding", { status: 415 })
           }
           const telemetry = yield* Effect.result(codec.decode({ body, encoding, signal }))
           if (telemetry._tag === "Failure") {
@@ -1113,6 +1144,7 @@ export function collectorLayer(
 ): Layer.Layer<CollectorServices, LiveUsageStoreError>
 export function collectorLayer({
   deviceId,
+  maxBuckets = 100_000,
   maxBodyBytes,
   maxFingerprints = 100_000,
   retentionDays = 45,
@@ -1122,12 +1154,13 @@ export function collectorLayer({
   LiveUsageStoreError,
   CollectorRuntime
 > {
+  const boundedBuckets = Math.max(1, Math.trunc(maxBuckets))
   const boundedFingerprints = Math.max(1, Math.trunc(maxFingerprints))
   const boundedRetentionDays = Math.max(1, Math.trunc(retentionDays))
   const dependencies = Layer.mergeAll(
     otlpLayer,
     normalizerLayer,
-    storeLayer(deviceId, boundedRetentionDays, boundedFingerprints, statePath),
+    storeLayer(deviceId, boundedRetentionDays, boundedBuckets, boundedFingerprints, statePath),
   )
   return Layer.merge(
     dependencies,

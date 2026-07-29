@@ -6,7 +6,7 @@ import type {
   UsageSnapshot,
   UsageTokens,
 } from "@lumen-build/sync-contracts"
-import { emptyUsageTokens, usageSnapshotKey } from "@lumen-build/sync-contracts"
+import { addUsageTokens, emptyUsageTokens, usageSnapshotKey } from "@lumen-build/sync-contracts"
 import { Context, Effect, Layer, Schema } from "effect"
 
 export interface UsageBaseline extends UsageSnapshot {}
@@ -125,18 +125,15 @@ const addDelta = (
   authoritative: UsageTokens,
   current: UsageTokens,
   baseline: UsageTokens,
-): UsageTokens => ({
-  cacheCreationInput:
-    authoritative.cacheCreationInput +
-    Math.max(current.cacheCreationInput - baseline.cacheCreationInput, 0),
-  cacheReadInput:
-    authoritative.cacheReadInput + Math.max(current.cacheReadInput - baseline.cacheReadInput, 0),
-  input: authoritative.input + Math.max(current.input - baseline.input, 0),
-  output: authoritative.output + Math.max(current.output - baseline.output, 0),
-  reasoningOutput:
-    authoritative.reasoningOutput + Math.max(current.reasoningOutput - baseline.reasoningOutput, 0),
-  tool: authoritative.tool + Math.max(current.tool - baseline.tool, 0),
-})
+): UsageTokens =>
+  addUsageTokens(authoritative, {
+    cacheCreationInput: Math.max(current.cacheCreationInput - baseline.cacheCreationInput, 0),
+    cacheReadInput: Math.max(current.cacheReadInput - baseline.cacheReadInput, 0),
+    input: Math.max(current.input - baseline.input, 0),
+    output: Math.max(current.output - baseline.output, 0),
+    reasoningOutput: Math.max(current.reasoningOutput - baseline.reasoningOutput, 0),
+    tool: Math.max(current.tool - baseline.tool, 0),
+  })
 
 const ensureUnique = <A>(
   label: string,

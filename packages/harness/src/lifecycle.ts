@@ -6,25 +6,14 @@ import { prepareConfiguration, prepareRemoval } from "./configuration"
 import {
   Harness,
   HarnessConfigurationConflict,
+  ManagedChange,
   managedPathKey,
   type HarnessStatus,
-  type ManagedChange,
 } from "./model"
 import type { HarnessPaths } from "./paths"
 
-const ManagedValueSchema = Schema.Union([
-  Schema.Struct({ _tag: Schema.Literal("Absent") }),
-  Schema.Struct({ _tag: Schema.Literal("Present"), value: Schema.Json }),
-])
-
-const ManagedChangeSchema = Schema.Struct({
-  after: ManagedValueSchema,
-  before: ManagedValueSchema,
-  path: Schema.Array(Schema.String),
-})
-
 const OwnershipRecord = Schema.Struct({
-  changes: Schema.Array(ManagedChangeSchema),
+  changes: Schema.Array(ManagedChange),
   collectorUrl: Schema.String,
   hadOriginal: Schema.Boolean,
   harness: Harness,

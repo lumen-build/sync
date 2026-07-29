@@ -731,11 +731,46 @@ const application = root.pipe(
 )
 
 const commandName = (): string => {
-  const positional = process.argv
-    .slice(2)
-    .filter((argument) => !argument.startsWith("-") && !argument.endsWith(".toml"))
-    .slice(0, 2)
+  const positional: Array<string> = []
+  const arguments_ = process.argv.slice(2)
+  const flagsWithValues = new Set(["--completions", "--config", "--log-level"])
+  for (let index = 0; index < arguments_.length && positional.length < 2; index += 1) {
+    const argument = arguments_[index]
+    if (argument === undefined) continue
+    if (flagsWithValues.has(argument)) {
+      index += 1
+      continue
+    }
+    if (argument.startsWith("-")) continue
+    positional.push(argument)
+  }
   return positional.length === 0 ? "lumen-sync" : positional.join(".")
+}
+
+const taggedErrorCode = (failure: unknown): string => {
+  if (
+    typeof failure === "object" &&
+    failure !== null &&
+    "_tag" in failure &&
+    typeof failure._tag === "string"
+  ) {
+    return failure._tag
+  }
+  return "CliFailure"
+}
+
+const failureMessage = (failure: unknown): string | undefined => {
+  if (typeof failure !== "object" || failure === null) return undefined
+  if ("message" in failure && typeof failure.message === "string" && failure.message.length > 0) {
+    return failure.message
+  }
+  if ("reason" in failure && typeof failure.reason === "string" && failure.reason.length > 0) {
+    return failure.reason
+  }
+  if ("key" in failure && typeof failure.key === "string") {
+    return `Missing configuration: ${failure.key}`
+  }
+  return undefined
 }
 
 const run = Effect.gen(function* () {
@@ -751,26 +786,9 @@ const run = Effect.gen(function* () {
         })
       }
       const failure = Cause.squash(cause)
-      const code =
-        typeof failure === "object" &&
-        failure !== null &&
-        "_tag" in failure &&
-        typeof failure._tag === "string"
-          ? failure._tag
-          : "CliFailure"
-      const objectMessage =
-        typeof failure === "object" && failure !== null
-          ? "message" in failure &&
-            typeof failure.message === "string" &&
-            failure.message.length > 0
-            ? failure.message
-            : "reason" in failure && typeof failure.reason === "string" && failure.reason.length > 0
-              ? failure.reason
-              : "key" in failure && typeof failure.key === "string"
-                ? `Missing configuration: ${failure.key}`
-                : undefined
-          : undefined
-      const message = objectMessage ?? (Cause.pretty(cause).trim() || "CLI command failed")
+      const code = taggedErrorCode(failure)
+      const message =
+        failureMessage(failure) ?? (Cause.pretty(cause).trim() || "CLI command failed")
       return writer
         .emitError({
           command: commandName(),

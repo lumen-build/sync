@@ -152,3 +152,24 @@ test("reports a missing endpoint as a structured error without inventing a defau
     await rm(home, { force: true, recursive: true })
   }
 })
+
+test("reports the command when an explicit config path has no TOML suffix", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lumen-sync-cli-config-path-"))
+  try {
+    const configPath = join(home, "settings")
+    await writeFile(configPath, "")
+    const result = await runCli(["--config", configPath, "--json", "collector", "status"], {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, "config"),
+    })
+
+    expect(result.exitCode).not.toBe(0)
+    expect(parseEvents(result.stdout)[0]).toMatchObject({
+      command: "collector.status",
+      type: "error",
+    })
+  } finally {
+    await rm(home, { force: true, recursive: true })
+  }
+})

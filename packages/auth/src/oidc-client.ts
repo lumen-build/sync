@@ -13,6 +13,7 @@ import {
 } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 
+import { withAuthenticationDeadline } from "./deadline.js"
 import { AuthenticationFailed } from "./errors.js"
 import { OidcClient } from "./ports.js"
 
@@ -58,26 +59,12 @@ const authenticationFailed = (operation: string, reason: unknown): Authenticatio
     reason: reason instanceof Error ? reason.message : String(reason),
   })
 
-const OIDC_REQUEST_TIMEOUT = "30 seconds"
-
-const withRequestDeadline = <A>(
-  operation: string,
-  request: Effect.Effect<A, AuthenticationFailed>,
-): Effect.Effect<A, AuthenticationFailed> =>
-  request.pipe(
-    Effect.timeoutOrElse({
-      duration: OIDC_REQUEST_TIMEOUT,
-      orElse: () =>
-        Effect.fail(authenticationFailed(operation, `timed out after ${OIDC_REQUEST_TIMEOUT}`)),
-    }),
-  )
-
 const requestJson = Effect.fn("OidcClient.requestJson")(function* (
   operation: string,
   request: HttpClientRequest.HttpClientRequest,
 ) {
   const client = yield* HttpClient.HttpClient
-  return yield* withRequestDeadline(
+  return yield* withAuthenticationDeadline(
     operation,
     Effect.gen(function* () {
       const response = yield* client
@@ -102,7 +89,7 @@ const requestVoid = Effect.fn("OidcClient.requestVoid")(function* (
   request: HttpClientRequest.HttpClientRequest,
 ) {
   const client = yield* HttpClient.HttpClient
-  const response = yield* withRequestDeadline(
+  const response = yield* withAuthenticationDeadline(
     operation,
     client
       .execute(request)

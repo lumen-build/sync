@@ -14,32 +14,14 @@ import {
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
+import { withAuthenticationDeadline } from "./deadline.js"
 import { AuthenticationFailed, MissingCredential, SecretStoreError } from "./errors.js"
 import { AuthorizationCodeReceiver } from "./oidc-client.js"
 import { AssertionProvider, SecretStore } from "./ports.js"
 
 const StoredSecrets = Schema.Record(Schema.String, Schema.String)
-const ASSERTION_REQUEST_TIMEOUT = "30 seconds"
-
 const secretError = (operation: string, cause: unknown): SecretStoreError =>
   new SecretStoreError({ cause, operation })
-
-const withAssertionDeadline = <A>(
-  operation: string,
-  request: Effect.Effect<A, AuthenticationFailed>,
-): Effect.Effect<A, AuthenticationFailed> =>
-  request.pipe(
-    Effect.timeoutOrElse({
-      duration: ASSERTION_REQUEST_TIMEOUT,
-      orElse: () =>
-        Effect.fail(
-          new AuthenticationFailed({
-            operation,
-            reason: `timed out after ${ASSERTION_REQUEST_TIMEOUT}`,
-          }),
-        ),
-    }),
-  )
 
 const readSecrets = Effect.fn("SecretStore.file.read")(function* (filePath: string) {
   return yield* Effect.gen(function* () {
@@ -186,7 +168,7 @@ const githubAssertion = Effect.fn("AssertionProvider.github")(function* (
       }),
   })
   if (audience !== undefined) requestUrl.searchParams.set("audience", audience)
-  const payload = yield* withAssertionDeadline(
+  const payload = yield* withAuthenticationDeadline(
     "request GitHub Actions OIDC assertion",
     Effect.gen(function* () {
       const response = yield* client
