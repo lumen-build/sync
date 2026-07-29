@@ -31,8 +31,8 @@ bun run test:e2e:harness
 ```
 
 The harness E2E downloads and invokes pinned real vendor CLIs. Set
-`LUMEN_HARNESS_AGENT` to `claude`, `codex`, `gemini`, or `opencode` to run one
-case.
+`LUMEN_HARNESS_AGENT` to `claude`, `codex`, `copilot`, `gemini`, or `opencode`
+to run one case.
 
 Tests must not contact a production receiver or model provider. Use loopback
 servers, `oauth2-mock-server`, and the pinned model mock. Never weaken an
