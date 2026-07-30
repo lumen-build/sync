@@ -1,0 +1,162 @@
+{
+  "protocol": "lumen-sync-destination/v1",
+  "illustrativeBaseUrl": "https://usage.lumen.build",
+  "mocked": true,
+  "isDefault": false,
+  "exchanges": [
+    {
+      "name": "put-live-snapshots",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/usage/otel-snapshots",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer mocked-lumen-token",
+          "content-type": "application/json"
+        },
+        "body": {
+          "source": "otel-live",
+          "capturedAt": "2026-07-29T10:00:00.000Z",
+          "deviceId": "ec7100cb-d60f-479a-a136-85327ec03f8b",
+          "snapshots": [
+            {
+              "agent": "codex",
+              "day": "2026-07-29",
+              "model": "gpt-test",
+              "provider": "openai",
+              "revision": 1,
+              "tokens": {
+                "cacheCreationInput": 0,
+                "cacheReadInput": 2,
+                "input": 11,
+                "output": 3,
+                "reasoningOutput": 1,
+                "tool": 0
+              }
+            }
+          ],
+          "costs": [
+            {
+              "agent": "codex",
+              "coverage": "source-reported",
+              "day": "2026-07-29",
+              "estimatedCostNanoUsd": 125000000,
+              "revision": 1,
+              "unpricedEvents": 0
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "accepted": 1
+        }
+      }
+    },
+    {
+      "name": "start-daily-sync",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/usage-syncs/11236047-7ee3-4238-8157-f189bbc16927",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer mocked-lumen-token",
+          "content-type": "application/json"
+        },
+        "body": {
+          "capturedAt": "2026-07-29T11:00:00.000Z",
+          "costSnapshotCount": 1,
+          "deviceId": "ec7100cb-d60f-479a-a136-85327ec03f8b",
+          "snapshotCount": 1,
+          "source": "ccusage-daily",
+          "sourceVersion": "20.0.19",
+          "timeZone": "UTC"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "status": "pending",
+          "syncId": "11236047-7ee3-4238-8157-f189bbc16927"
+        }
+      }
+    },
+    {
+      "name": "put-daily-snapshots",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/usage-syncs/11236047-7ee3-4238-8157-f189bbc16927/snapshots",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer mocked-lumen-token",
+          "content-type": "application/json"
+        },
+        "body": {
+          "costs": [
+            {
+              "agent": "codex",
+              "coverage": "source-reported",
+              "day": "2026-07-29",
+              "estimatedCostNanoUsd": 125000000,
+              "unpricedEvents": 0
+            }
+          ],
+          "snapshots": [
+            {
+              "agent": "codex",
+              "day": "2026-07-29",
+              "model": "gpt-test",
+              "provider": "openai",
+              "tokens": {
+                "cacheCreationInput": 0,
+                "cacheReadInput": 2,
+                "input": 11,
+                "output": 3,
+                "reasoningOutput": 1,
+                "tool": 0
+              }
+            }
+          ],
+          "source": "ccusage-daily"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "accepted": 1
+        }
+      }
+    },
+    {
+      "name": "commit-daily-sync",
+      "request": {
+        "method": "POST",
+        "path": "/v1/usage-syncs/11236047-7ee3-4238-8157-f189bbc16927/commit",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer mocked-lumen-token"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "committed": 1
+        }
+      }
+    }
+  ]
+}

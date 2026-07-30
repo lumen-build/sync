@@ -1,0 +1,21 @@
+{
+  "name": "@lumen-build/sync-auth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lumen-build/sync-config": "workspace:*",
+    "@lumen-build/sync-contracts": "workspace:*",
+    "effect": "4.0.0-beta.102",
+    "jose": "6.2.4"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "4.0.0-beta.102"
+  }
+}

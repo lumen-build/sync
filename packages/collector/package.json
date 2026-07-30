@@ -1,0 +1,21 @@
+{
+  "name": "@lumen-build/sync-collector",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bun": "./src/server-bun.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lumen-build/sync-contracts": "workspace:*",
+    "@lumen-build/sync-otlp": "workspace:*",
+    "effect": "4.0.0-beta.102"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "4.0.0-beta.102"
+  }
+}

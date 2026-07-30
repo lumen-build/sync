@@ -1,0 +1,19 @@
+{
+  "name": "@lumen-build/sync-receiver-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "test": "bun test test/receiver.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lumen-build/sync": "0.1.0",
+    "effect": "4.0.0-beta.102"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.4",
+    "typescript": "7.0.2"
+  }
+}
