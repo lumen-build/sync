@@ -12,10 +12,10 @@
   "dependencies": {
     "@lumen-build/sync-config": "workspace:*",
     "@lumen-build/sync-contracts": "workspace:*",
-    "effect": "4.0.0-beta.102",
-    "jose": "6.2.4"
+    "effect": "4.0.0-beta.107",
+    "jose": "6.2.9"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.0-beta.102"
+    "@effect/platform-bun": "4.0.0-beta.107"
   }
 }

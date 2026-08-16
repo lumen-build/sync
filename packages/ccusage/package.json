@@ -12,9 +12,9 @@
   "dependencies": {
     "@lumen-build/sync-contracts": "workspace:*",
     "ccusage": "20.0.19",
-    "effect": "4.0.0-beta.102"
+    "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.0-beta.102"
+    "@effect/platform-bun": "4.0.0-beta.107"
   }
 }

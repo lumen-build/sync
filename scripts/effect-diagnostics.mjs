@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process"
 import { chmodSync } from "node:fs"
 import { resolve } from "node:path"
 
-const cli = resolve("node_modules", "@effect", "tsgo", "dist", "effect-tsgo.js")
+const cli = resolve("node_modules", "@effect", "tsgo", "dist", "effect-tsgo.cjs")
 const binary = execFileSync(process.execPath, [cli, "get-exe-path"], {
   encoding: "utf8",
 }).trim()

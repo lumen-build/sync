@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.102",
-    "protobufjs": "8.7.1"
+    "effect": "4.0.0-beta.107",
+    "protobufjs": "8.7.2"
   }
 }
