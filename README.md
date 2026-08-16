@@ -16,7 +16,7 @@ agent harnesses ──OTLP──▶ local collector ──live, revisioned──
 - A receiver that implements the documented destination contract
 - One or more supported agent harnesses
 
-The workspace pins Bun 1.3.4, Effect 4.0.0-beta.102, and ccusage 20.0.19.
+The workspace pins Bun 1.3.4, Effect 4.0.0-beta.107, and ccusage 20.0.19.
 
 ## Install
 
@@ -234,7 +234,7 @@ package-plugin cache. It waits for the completed assistant event, then proves
 the exact primary input/output pair through both the live plugin and ccusage.
 OpenCode also makes an auxiliary title request; the strict mock proves that
 request separately while the destination assertion proves that OpenCode's usage
-surfaces expose only the primary call. Gemini CLI 0.53.0 consumes the exact
+surfaces expose only the primary call. Gemini CLI 0.55.1 consumes the exact
 managed telemetry configuration and creates a non-empty ccusage report, but did
 not flush native OTLP to the collector in a bounded test run. That limitation
 is not hidden by injecting an undocumented endpoint or waiting indefinitely.
@@ -643,9 +643,9 @@ requirements, environment-over-TOML precedence, live retry/checkpoint/restart
 behavior, deduplication, a non-empty bundled ccusage import with lost-response
 replay, CI OIDC assertion exchange, and local PKCE login/refresh/revocation.
 
-The Linux real-harness matrix pins Claude Code 2.1.220, Codex 0.146.0, GitHub
-Copilot CLI 1.0.75, Gemini CLI 0.53.0, OpenCode 1.18.9,
-[aimock](https://aimock.copilotkit.dev/) 1.37.4, and Node 22.23.1 in a separate
+The Linux real-harness matrix pins Claude Code 2.1.233, Codex 0.147.0, GitHub
+Copilot CLI 1.0.80, Gemini CLI 0.55.1, OpenCode 1.18.18,
+[aimock](https://aimock.copilotkit.dev/) 1.38.0, and Node 22.23.2 in a separate
 lockfile. Each case configures and re-inspects the harness through the installed
 CLI, sends a canary prompt to a strict local model mock, runs the real vendor
 binary, proves a non-empty daily ccusage import, and verifies that the

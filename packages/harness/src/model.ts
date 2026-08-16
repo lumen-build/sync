@@ -136,7 +136,7 @@ export interface PreparedConfiguration {
   readonly state: ConfigurationState
 }
 
-export class HarnessConfigurationError extends Schema.TaggedErrorClass<HarnessConfigurationError>()(
+export class HarnessConfigurationError extends Schema.TaggedError<HarnessConfigurationError>()(
   "HarnessConfigurationError",
   {
     harness: Harness,
@@ -144,7 +144,7 @@ export class HarnessConfigurationError extends Schema.TaggedErrorClass<HarnessCo
   },
 ) {}
 
-export class HarnessConfigurationConflict extends Schema.TaggedErrorClass<HarnessConfigurationConflict>()(
+export class HarnessConfigurationConflict extends Schema.TaggedError<HarnessConfigurationConflict>()(
   "HarnessConfigurationConflict",
   {
     fields: Schema.Array(Schema.String),

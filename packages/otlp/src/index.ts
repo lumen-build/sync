@@ -65,11 +65,11 @@ export interface DecodeRequest {
   readonly signal: OtlpSignal
 }
 
-export class OtlpDecodeError extends Schema.TaggedErrorClass<OtlpDecodeError>()("OtlpDecodeError", {
+export class OtlpDecodeError extends Schema.TaggedError<OtlpDecodeError>()("OtlpDecodeError", {
   signal: OtlpSignal,
 }) {}
 
-export class UnsupportedMediaType extends Schema.TaggedErrorClass<UnsupportedMediaType>()(
+export class UnsupportedMediaType extends Schema.TaggedError<UnsupportedMediaType>()(
   "UnsupportedMediaType",
   {
     contentType: Schema.String,

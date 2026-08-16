@@ -41,19 +41,16 @@ export type ReconciliationResult =
       readonly costs: ReadonlyArray<UsageCostSnapshot>
     }
 
-export class PolicyRequired extends Schema.TaggedErrorClass<PolicyRequired>()(
+export class PolicyRequired extends Schema.TaggedError<PolicyRequired>()(
   "ReconciliationPolicyRequired",
   {
     message: Schema.String,
   },
 ) {}
 
-export class InvalidInput extends Schema.TaggedErrorClass<InvalidInput>()(
-  "ReconciliationInvalidInput",
-  {
-    reason: Schema.String,
-  },
-) {}
+export class InvalidInput extends Schema.TaggedError<InvalidInput>()("ReconciliationInvalidInput", {
+  reason: Schema.String,
+}) {}
 
 export type ReconciliationError = PolicyRequired | InvalidInput
 

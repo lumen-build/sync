@@ -1,6 +1,6 @@
 import { Context, Effect, Schema } from "effect"
 
-export class DeviceIdentityError extends Schema.TaggedErrorClass<DeviceIdentityError>()(
+export class DeviceIdentityError extends Schema.TaggedError<DeviceIdentityError>()(
   "DeviceIdentityError",
   {
     path: Schema.String,

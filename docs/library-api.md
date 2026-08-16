@@ -6,7 +6,7 @@ Install the package locally when embedding it:
 bun add @lumen-build/sync
 ```
 
-The package currently pins Effect `4.0.0-beta.102`. Its Effect-facing API should
+The package currently pins Effect `4.0.0-beta.107`. Its Effect-facing API should
 be treated as beta until Effect 4 is stable.
 
 ## Entry points

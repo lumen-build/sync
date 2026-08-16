@@ -101,7 +101,7 @@ const CodexDailyReport = Schema.Struct({
   totals: CodexTotals,
 })
 
-export class InvalidCcusageReport extends Schema.TaggedErrorClass<InvalidCcusageReport>()(
+export class InvalidCcusageReport extends Schema.TaggedError<InvalidCcusageReport>()(
   "InvalidCcusageReport",
   {
     agent: CcusageAgent,
@@ -109,7 +109,7 @@ export class InvalidCcusageReport extends Schema.TaggedErrorClass<InvalidCcusage
   },
 ) {}
 
-export class CcusageCommandFailed extends Schema.TaggedErrorClass<CcusageCommandFailed>()(
+export class CcusageCommandFailed extends Schema.TaggedError<CcusageCommandFailed>()(
   "CcusageCommandFailed",
   {
     agent: CcusageAgent,

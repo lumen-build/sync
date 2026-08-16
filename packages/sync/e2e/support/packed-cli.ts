@@ -7,7 +7,7 @@ import { Effect, Fiber, Option, Queue, Schema } from "effect"
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..")
 
-export class PackedCliError extends Schema.TaggedErrorClass<PackedCliError>()("PackedCliError", {
+export class PackedCliError extends Schema.TaggedError<PackedCliError>()("PackedCliError", {
   operation: Schema.String,
   reason: Schema.String,
 }) {}

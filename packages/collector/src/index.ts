@@ -49,14 +49,14 @@ export const UsageEvent = Schema.Struct({
 
 export type UsageEvent = typeof UsageEvent.Type
 
-export class NormalizationError extends Schema.TaggedErrorClass<NormalizationError>()(
+export class NormalizationError extends Schema.TaggedError<NormalizationError>()(
   "NormalizationError",
   {
     cause: Schema.Defect(),
   },
 ) {}
 
-export class LiveUsageStoreError extends Schema.TaggedErrorClass<LiveUsageStoreError>()(
+export class LiveUsageStoreError extends Schema.TaggedError<LiveUsageStoreError>()(
   "LiveUsageStoreError",
   {
     reason: Schema.String,
@@ -109,7 +109,7 @@ export interface CollectorServerOptions {
   readonly port: number
 }
 
-export class CollectorServerError extends Schema.TaggedErrorClass<CollectorServerError>()(
+export class CollectorServerError extends Schema.TaggedError<CollectorServerError>()(
   "CollectorServerError",
   {
     reason: Schema.String,

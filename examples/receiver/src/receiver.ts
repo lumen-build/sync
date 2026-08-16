@@ -16,7 +16,7 @@ export interface ReferenceReceiverOptions {
   readonly port?: number
 }
 
-export class ReferenceReceiverError extends Schema.TaggedErrorClass<ReferenceReceiverError>()(
+export class ReferenceReceiverError extends Schema.TaggedError<ReferenceReceiverError>()(
   "ReferenceReceiverError",
   {
     reason: Schema.String,

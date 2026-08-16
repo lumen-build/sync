@@ -10,7 +10,7 @@ import {
 } from "@lumen-build/sync-contracts"
 import { Effect, Queue, Ref, Schema } from "effect"
 
-export class MockDestinationError extends Schema.TaggedErrorClass<MockDestinationError>()(
+export class MockDestinationError extends Schema.TaggedError<MockDestinationError>()(
   "MockDestinationError",
   {
     reason: Schema.String,

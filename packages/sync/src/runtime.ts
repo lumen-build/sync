@@ -20,7 +20,7 @@ export interface DailySyncIdKey {
   readonly until: string
 }
 
-export class DailySyncIdJournalError extends Schema.TaggedErrorClass<DailySyncIdJournalError>()(
+export class DailySyncIdJournalError extends Schema.TaggedError<DailySyncIdJournalError>()(
   "DailySyncIdJournalError",
   {
     operation: Schema.String,
@@ -138,7 +138,7 @@ const consoleReporter: RuntimeReporter = {
   uploadSucceeded: (accepted) => Console.log(`Uploaded ${accepted} live usage snapshots`),
 }
 
-export class InvalidUploadInterval extends Schema.TaggedErrorClass<InvalidUploadInterval>()(
+export class InvalidUploadInterval extends Schema.TaggedError<InvalidUploadInterval>()(
   "InvalidUploadInterval",
   {
     milliseconds: Schema.Number,
