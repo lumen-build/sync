@@ -84,7 +84,7 @@ const expectations = {
       },
     ],
     responseContent: "deterministic Claude response",
-    version: "2.1.220",
+    version: "2.1.233",
   },
   codex: {
     models: ["lumen-e2e-model"],
@@ -102,7 +102,7 @@ const expectations = {
       },
     ],
     responseContent: "deterministic Codex response",
-    version: "0.146.0",
+    version: "0.147.0",
   },
   copilot: {
     models: ["lumen-e2e-model"],
@@ -120,7 +120,7 @@ const expectations = {
       },
     ],
     responseContent: "deterministic Copilot response",
-    version: "1.0.75",
+    version: "1.0.80",
   },
   gemini: {
     models: ["gemini-3.1-pro-preview-customtools"],
@@ -138,7 +138,7 @@ const expectations = {
       },
     ],
     responseContent: "deterministic Gemini response",
-    version: "0.53.0",
+    version: "0.55.1",
   },
   opencode: {
     models: ["gpt-5.4-nano", "lumen-e2e-model"],
@@ -167,7 +167,7 @@ const expectations = {
       },
     ],
     responseContent: "deterministic OpenCode response",
-    version: "1.18.9",
+    version: "1.18.18",
   },
 } as const satisfies Readonly<Record<HarnessAgentType, HarnessFixtureExpectation>>
 
@@ -866,7 +866,7 @@ it(
             environment: process.env,
           })
           expect(nodeVersion.exitCode).toBe(0)
-          expect(nodeVersion.stdout.trim()).toBe("v22.23.1")
+          expect(nodeVersion.stdout.trim()).toBe("v22.23.2")
 
           const cli = yield* packedCli
           for (const agent of yield* selectedHarnesses) {

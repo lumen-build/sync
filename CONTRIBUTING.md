@@ -8,7 +8,7 @@ Requirements:
 
 - Bun 1.3.4
 - Git
-- Node 22.23.1 only when running the real-harness fixture locally
+- Node 22.23.2 only when running the real-harness fixture locally
 
 ```sh
 bun install --frozen-lockfile
