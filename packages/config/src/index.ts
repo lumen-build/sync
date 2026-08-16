@@ -97,22 +97,22 @@ export interface Configuration {
   readonly destination?: { readonly baseUrl: string }
 }
 
-export class InvalidConfiguration extends Schema.TaggedErrorClass<InvalidConfiguration>()(
+export class InvalidConfiguration extends Schema.TaggedError<InvalidConfiguration>()(
   "Configuration.Invalid",
   { reason: Schema.String },
 ) {}
 
-export class MissingConfiguration extends Schema.TaggedErrorClass<MissingConfiguration>()(
+export class MissingConfiguration extends Schema.TaggedError<MissingConfiguration>()(
   "Configuration.Missing",
   { key: Schema.String },
 ) {}
 
-export class ConfigurationFileError extends Schema.TaggedErrorClass<ConfigurationFileError>()(
+export class ConfigurationFileError extends Schema.TaggedError<ConfigurationFileError>()(
   "Configuration.FileError",
   { path: Schema.String, reason: Schema.String },
 ) {}
 
-export class ConfigurationInitError extends Schema.TaggedErrorClass<ConfigurationInitError>()(
+export class ConfigurationInitError extends Schema.TaggedError<ConfigurationInitError>()(
   "Configuration.InitError",
   { path: Schema.String, reason: Schema.String },
 ) {}

@@ -30,14 +30,11 @@ const Ownership = Schema.Struct({
 
 type Ownership = typeof Ownership.Type
 
-export class HarnessFileError extends Schema.TaggedErrorClass<HarnessFileError>()(
-  "HarnessFileError",
-  {
-    operation: Schema.String,
-    path: Schema.String,
-    reason: Schema.String,
-  },
-) {}
+export class HarnessFileError extends Schema.TaggedError<HarnessFileError>()("HarnessFileError", {
+  operation: Schema.String,
+  path: Schema.String,
+  reason: Schema.String,
+}) {}
 
 export interface FileSnapshot {
   readonly contents: string

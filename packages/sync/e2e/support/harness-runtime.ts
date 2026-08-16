@@ -15,7 +15,7 @@ const fixtureDirectory = join(repositoryRoot, "packages", "sync", "e2e", "fixtur
 export const HarnessAgent = CcusageAgent
 export type HarnessAgent = typeof HarnessAgent.Type
 
-export class HarnessE2eError extends Schema.TaggedErrorClass<HarnessE2eError>()("HarnessE2eError", {
+export class HarnessE2eError extends Schema.TaggedError<HarnessE2eError>()("HarnessE2eError", {
   operation: Schema.String,
   reason: Schema.String,
 }) {}

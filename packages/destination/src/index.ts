@@ -12,28 +12,28 @@ import {
 import { Context, Effect, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 
-export class DestinationUnavailable extends Schema.TaggedErrorClass<DestinationUnavailable>()(
+export class DestinationUnavailable extends Schema.TaggedError<DestinationUnavailable>()(
   "DestinationUnavailable",
   {
     reason: Schema.String,
   },
 ) {}
 
-export class DestinationRejected extends Schema.TaggedErrorClass<DestinationRejected>()(
+export class DestinationRejected extends Schema.TaggedError<DestinationRejected>()(
   "DestinationRejected",
   {
     status: Schema.Number,
   },
 ) {}
 
-export class InvalidDestinationResponse extends Schema.TaggedErrorClass<InvalidDestinationResponse>()(
+export class InvalidDestinationResponse extends Schema.TaggedError<InvalidDestinationResponse>()(
   "InvalidDestinationResponse",
   {
     reason: Schema.String,
   },
 ) {}
 
-export class InvalidDestinationConfiguration extends Schema.TaggedErrorClass<InvalidDestinationConfiguration>()(
+export class InvalidDestinationConfiguration extends Schema.TaggedError<InvalidDestinationConfiguration>()(
   "InvalidDestinationConfiguration",
   {
     reason: Schema.String,

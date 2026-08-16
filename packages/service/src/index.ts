@@ -54,7 +54,7 @@ export interface DefinitionOptions {
   readonly prefixArguments?: ReadonlyArray<string>
 }
 
-export class InvalidServiceDefinition extends Schema.TaggedErrorClass<InvalidServiceDefinition>()(
+export class InvalidServiceDefinition extends Schema.TaggedError<InvalidServiceDefinition>()(
   "InvalidServiceDefinition",
   {
     field: Schema.String,
@@ -62,7 +62,7 @@ export class InvalidServiceDefinition extends Schema.TaggedErrorClass<InvalidSer
   },
 ) {}
 
-export class ServiceLifecycleError extends Schema.TaggedErrorClass<ServiceLifecycleError>()(
+export class ServiceLifecycleError extends Schema.TaggedError<ServiceLifecycleError>()(
   "ServiceLifecycleError",
   {
     operation: Schema.String,

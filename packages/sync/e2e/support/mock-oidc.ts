@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import { Events, OAuth2Server } from "oauth2-mock-server"
 
-export class MockOidcError extends Schema.TaggedErrorClass<MockOidcError>()("MockOidcError", {
+export class MockOidcError extends Schema.TaggedError<MockOidcError>()("MockOidcError", {
   operation: Schema.String,
   reason: Schema.String,
 }) {}
